@@ -1,0 +1,9 @@
+node_modules/
+.live/
+.seat-home/
+.probe-home/
+*.tmp
+*.log
+
+# macOS
+.DS_Store

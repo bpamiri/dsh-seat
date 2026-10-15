@@ -1,0 +1,11 @@
+dsh-seat
+Copyright 2026 Peter Amiri
+
+This product includes software developed as part of the dsh-seat project
+(https://github.com/bpamiri/dsh-seat).
+
+dsh-seat is an independent seat runner for the DeepSeek Harness. It talks to
+`dsh` over its published command line and the Agent Client Protocol, and to
+OpenRig over its published CLI and HTTP API. It contains no code from either
+project. It is not affiliated with, endorsed by, or supported by the OpenRig
+project or DeepSeek.

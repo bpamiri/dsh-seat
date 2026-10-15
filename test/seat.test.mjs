@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: Apache-2.0
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { runSeat, parseArgs, RUNNER_READY_MARKER, RUNNER_ERROR_MARKER } from "../src/dsh-seat.mjs";
+import { sidecarPath, readSidecar } from "../src/state.mjs";
+import { fakeAgentFactory, recordingActivity, captureStream, openInput, waitFor } from "./helpers.mjs";
+
+function workspace() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-test-"));
+  return { dir, stateRoot: path.join(dir, "state"), home: path.join(dir, "dsh-home") };
+}
+
+/** Start a seat against the fake agent and return handles. */
+function startSeat({ argv = [], agentEnv = {}, posture = "floor" } = {}) {
+  const { dir, stateRoot, home } = workspace();
+  const args = parseArgs(
+    [
+      "--session-name",
+      "dev1-dsh@test-rig",
+      "--cwd",
+      dir,
+      "--state-root",
+      stateRoot,
+      "--dsh-home",
+      home,
+      "--posture",
+      posture,
+      ...argv,
+    ],
+    {},
+  );
+  const input = openInput();
+  const output = captureStream();
+  const activity = recordingActivity();
+  const done = runSeat({
+    args,
+    input,
+    output,
+    errorOutput: output,
+    // Keep the runner away from the real ~/.openrig activity endpoint.
+    env: { OPENRIG_HOME: path.join(dir, "openrig-home") },
+    clientFactory: fakeAgentFactory(agentEnv),
+    activityFactory: () => activity,
+  });
+  return { args, input, output, activity, done, dir, stateRoot, home };
+}
+
+test("parseArgs applies seat defaults and rejects nonsense", () => {
+  const args = parseArgs(["--cwd", "/tmp", "--session-name", "a@b"], {});
+  assert.equal(args.sessionName, "a@b");
+  assert.equal(args.cwd, "/tmp");
+  assert.equal(args.profile, "acp");
+  assert.equal(args.posture, "floor");
+  assert.ok(args.launchId, "a launch id is minted");
+  assert.ok(args.stateRoot.endsWith(path.join("state", "dsh")));
+
+  assert.throws(() => parseArgs(["--nope"], {}), /unknown argument/);
+  assert.throws(() => parseArgs(["--cwd"], {}), /requires a value/);
+  assert.throws(() => parseArgs(["--request-timeout", "soon"], {}), /non-negative number/);
+  assert.throws(() => parseArgs(["--posture", "reckless"], {}), /unknown posture/);
+});
+
+test("a seat becomes READY, carries a prompt to the agent, and mirrors the answer", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "po|ng" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY marker" });
+
+  seat.input.write("what is up\n");
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "turn end" });
+
+  const text = seat.output.text();
+  assert.match(text, /pong/);
+  assert.match(text, /\[dsh-seat\] session session-fake-1/);
+
+  // Sidecar is the daemon's authoritative liveness + resume surface.
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.ready, true);
+  assert.equal(state.sessionId, "session-fake-1");
+  assert.equal(state.launchId, seat.args.launchId);
+  assert.equal(state.permissionMode, "workspace-write");
+
+  // Activity: identity once, then a turn boundary pair.
+  assert.deepEqual(seat.activity.kinds(), ["identity", "turnStart", "turnEnd"]);
+
+  seat.input.write("/quit\n");
+  const result = await seat.done;
+  assert.equal(result.sessionId, "session-fake-1");
+  assert.match(seat.output.text(), /\[dsh-runner\] EXITED \(user-quit\)/);
+
+  const finalState = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(finalState.ready, false);
+  assert.equal(finalState.exited.reason, "user-quit");
+});
+
+test("the seat's posture answers escalations, and the answer reaches the agent", async () => {
+  const seat = startSeat({ posture: "floor", agentEnv: { FAKE_ACP_ASK_PERMISSION: "1", FAKE_ACP_CHUNKS: "ok" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("do something risky\n");
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "turn end" });
+
+  const text = seat.output.text();
+  assert.match(text, /\[permission\] Run a dangerous command → reject_once \(Reject\) \(posture floor\)/);
+  assert.match(text, /\|permission=reject-once/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("full_bypass answers with a standing allow", async () => {
+  const seat = startSeat({ posture: "full_bypass", agentEnv: { FAKE_ACP_ASK_PERMISSION: "1", FAKE_ACP_CHUNKS: "ok" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("do something risky\n");
+  await waitFor(() => seat.output.text().includes("|permission=allow-always"), { label: "permission answer" });
+
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.permissionMode, "danger-full-access");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("prompts arriving mid-turn are queued, not dropped", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "slow" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("first\n");
+  seat.input.write("second\n");
+  seat.input.write("third\n");
+
+  await waitFor(() => (seat.output.text().match(/── turn end \(end_turn\) ──/g) ?? []).length === 3, {
+    label: "three turns",
+  });
+  assert.match(seat.output.text(), /\[queued: 1/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("a dead agent is reported honestly and never leaves a frozen pane", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_EXIT_ON_PROMPT: "1" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("this will kill the agent\n");
+  const result = await seat.done;
+
+  assert.equal(result.code, 1);
+  assert.match(seat.output.text(), new RegExp(RUNNER_ERROR_MARKER.replace(/[[\]]/g, "\\$&")));
+
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.ready, false);
+  assert.match(state.exited.reason, /agent-exit/);
+});
+
+test("resume failure is a loud failure unless fresh fallback is asked for", async () => {
+  const failing = startSeat({ argv: ["--session", "session-gone"], agentEnv: { FAKE_ACP_RESUME_FAILS: "1" } });
+  const failedResult = await failing.done;
+  assert.equal(failedResult.code, 1);
+  assert.match(failing.output.text(), new RegExp(RUNNER_ERROR_MARKER.replace(/[[\]]/g, "\\$&")));
+  assert.match(failing.output.text(), /resume refused by fake agent/);
+
+  const falling = startSeat({
+    argv: ["--session", "session-gone", "--resume-fallback-fresh"],
+    agentEnv: { FAKE_ACP_RESUME_FAILS: "1" },
+  });
+  await waitFor(() => falling.output.text().includes(RUNNER_READY_MARKER), { label: "READY after fallback" });
+  assert.match(falling.output.text(), /starting a fresh session/);
+
+  falling.input.write("/quit\n");
+  await falling.done;
+});
+
+test("context usage and local commands are surfaced to the operator", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "x", FAKE_ACP_USAGE: "1", FAKE_ACP_THOUGHT: "1" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("go\n");
+  await waitFor(() => seat.output.text().includes("[context] 25%"), { label: "usage line" });
+
+  seat.input.write("/session\n");
+  await waitFor(() => seat.output.text().includes("[dsh-seat] session session-fake-1"), { label: "/session" });
+
+  seat.input.write("/help\n");
+  await waitFor(() => seat.output.text().includes("local: /help /session /usage /cancel /quit"), { label: "/help" });
+  assert.match(seat.output.text(), /considering…/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});

@@ -1,0 +1,31 @@
+{
+  "name": "dsh-seat",
+  "version": "0.1.0",
+  "description": "A dependency-free runner that hosts a DeepSeek Harness (dsh) ACP agent in a tmux pane so OpenRig can adopt it as a seat.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bpamiri/dsh-seat.git"
+  },
+  "bin": {
+    "dsh-seat": "src/dsh-seat.mjs"
+  },
+  "exports": {
+    ".": "./src/dsh-seat.mjs",
+    "./acp": "./src/acp.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'",
+    "probe": "node probes/probe-acp.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
