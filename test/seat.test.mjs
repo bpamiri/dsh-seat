@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { runSeat, parseArgs, RUNNER_READY_MARKER, RUNNER_ERROR_MARKER } from "../src/dsh-seat.mjs";
+import { ActivityPoster } from "../src/activity.mjs";
 import { sidecarPath, readSidecar, seatFile } from "../src/state.mjs";
 import { fakeAgentFactory, recordingActivity, captureStream, openInput, waitFor } from "./helpers.mjs";
 
@@ -34,6 +35,7 @@ function startSeat({
   env = {},
   onClientOptions = () => {},
   identityResolver = null,
+  activityFactory = null,
 } = {}) {
   const { dir, stateRoot, home } = workspace();
   const args = parseArgs(
@@ -66,7 +68,7 @@ function startSeat({
       onClientOptions(opts);
       return fakeAgentFactory(agentEnv)(opts);
     },
-    activityFactory: () => activity,
+    activityFactory: activityFactory ?? (() => activity),
     identityResolver,
   });
   const seat = { args, input, output, activity, done, dir, stateRoot, home };
@@ -274,7 +276,8 @@ test("the dsh child runs with telemetry off, and the pane flags a home that stil
   assert.equal(childEnv.DSH_HOME, seat.home);
   assert.equal(childEnv.DSH_PERMISSION_MODE, "workspace-write");
   assert.match(seat.output.text(), /dsh telemetry off \(DSH_TELEMETRY_DISABLED=1\)/);
-  assert.match(seat.output.text(), /leaves dsh's session-log upload on/);
+  assert.match(seat.output.text(), /official DeepSeek API requests from this seat also carry the session log and the plugin package list/);
+  assert.match(seat.output.text(), /enabled: false on session-log-deepseek and plugin-package-inventory-deepseek/);
 
   seat.input.write("/quit\n");
   await seat.done;
@@ -284,7 +287,10 @@ test("an operator's telemetry choice is kept, and a patched home gets no upload 
   let childEnv = null;
   const { home } = workspace();
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "cordis.patch.yml"), "- id: session-log-deepseek\n  config:\n    enabled: false\n");
+  fs.writeFileSync(
+    path.join(home, "cordis.patch.yml"),
+    "- id: session-log-deepseek\n  config:\n    enabled: false\n- id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n",
+  );
   const seat = startSeat({
     argv: ["--dsh-home", home],
     env: { DSH_TELEMETRY_MODE: "FEEDBACK_ONLY" },
@@ -295,7 +301,7 @@ test("an operator's telemetry choice is kept, and a patched home gets no upload 
   assert.equal(childEnv.DSH_TELEMETRY_DISABLED, undefined);
   assert.equal(childEnv.DSH_TELEMETRY_MODE, "FEEDBACK_ONLY");
   assert.match(seat.output.text(), /dsh telemetry: operator setting kept/);
-  assert.doesNotMatch(seat.output.text(), /session-log upload on/);
+  assert.doesNotMatch(seat.output.text(), /also carry/);
 
   seat.input.write("/quit\n");
   await seat.done;
@@ -573,6 +579,40 @@ test("a node id given alone still lets the seat learn that node's generation", a
   const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
   assert.equal(state.nodeId, "node-x");
   assert.equal(state.generation, "gen-x");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("a seat started before the daemon finds its activity endpoint when it is adopted", async () => {
+  const posts = [];
+  const seat = startSeat({
+    activityFactory: (opts) =>
+      new ActivityPoster({
+        ...opts,
+        fetchImpl: async (url, init) => {
+          posts.push(JSON.parse(init.body));
+          return { ok: true, status: 200 };
+        },
+      }),
+    identityResolver: async () => ({ ok: true, nodeId: "node-late", generation: "gen-late" }),
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  assert.match(seat.output.text(), /activity reporting off for now/);
+  assert.deepEqual(posts, []);
+
+  // The daemon comes up, then adopts the pane and types its claim hint.
+  const openrigHome = path.join(seat.dir, "openrig-home");
+  fs.mkdirSync(openrigHome, { recursive: true });
+  fs.writeFileSync(path.join(openrigHome, "activity-endpoint.json"), JSON.stringify({ baseUrl: "http://127.0.0.1:9", token: "t0k" }));
+  seat.input.write('\x1b[200~--- OpenRig: You have been adopted into rig "r" as p.m. Run: rig whoami --json ---\x1b[201~\r');
+  await waitFor(() => posts.some((post) => post.hookEvent === "Stop"), { label: "a Stop hook" });
+
+  assert.match(seat.output.text(), /activity reporting on: found the OpenRig endpoint http:\/\/127\.0\.0\.1:9/);
+  assert.ok(posts.some((post) => post.eventFamily === "session_identity" && post.sessionId === "session-fake-1"));
+  const stop = posts.findLast((post) => post.hookEvent === "Stop");
+  assert.equal(stop.nodeId, "node-late");
+  assert.equal(stop.generation, "gen-late");
 
   seat.input.write("/quit\n");
   await seat.done;

@@ -43,6 +43,7 @@ export class ActivityPoster {
   #identity;
   #fetch;
   #onError;
+  #optedOut;
   #disabled;
 
   constructor({
@@ -59,6 +60,7 @@ export class ActivityPoster {
     this.#endpoint = endpoint;
     this.#fetch = fetchImpl;
     this.#onError = onError;
+    this.#optedOut = disabled;
     this.#disabled = disabled || !endpoint || typeof fetchImpl !== "function";
   }
 
@@ -83,6 +85,13 @@ export class ActivityPoster {
     });
     // Never let a daemon problem reach the seat loop.
     Promise.resolve(request).catch((err) => this.#onError(err));
+  }
+
+  /** An endpoint found after start: the daemon can come up after the seat. */
+  setEndpoint(endpoint) {
+    if (this.#optedOut || !endpoint || typeof this.#fetch !== "function") return;
+    this.#endpoint = endpoint;
+    this.#disabled = false;
   }
 
   /**
