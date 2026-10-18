@@ -39,7 +39,7 @@ import {
   describeDecision,
 } from "./permissions.mjs";
 import { ActivityPoster, readActivityEndpoint, defaultOpenRigHome } from "./activity.mjs";
-import { dshChildEnv, telemetryChosen, sessionLogUploadDisabled } from "./privacy.mjs";
+import { dshChildEnv, telemetryChosen, uploadsLeftOn } from "./privacy.mjs";
 import { CLAIM_HINT, resolveSeatIdentity } from "./identity.mjs";
 import { HarnessFingerprinter, defaultAgentsHome, diffHarness } from "./fingerprint.mjs";
 import { SessionLogTail, TAKE_WAITS_MS, TURN_RECORD_SCHEMA, turnUsageFields } from "./usage.mjs";
@@ -474,9 +474,12 @@ export async function runSeat(options) {
       ? "[dsh-seat] dsh telemetry: operator setting kept"
       : "[dsh-seat] dsh telemetry off (DSH_TELEMETRY_DISABLED=1)",
   );
-  if (!sessionLogUploadDisabled({ dshHome: args.dshHome, profile: args.profile })) {
+  const uploads = uploadsLeftOn({ dshHome: args.dshHome, profile: args.profile });
+  if (uploads.length) {
     writer.line(
-      "[dsh-seat] note: this seat home leaves dsh's session-log upload on — official-API requests also carry the session log. scripts/make-seat-home.sh writes the patch that turns it off.",
+      `[dsh-seat] note: official DeepSeek API requests from this seat also carry ${uploads.map((u) => u.label).join(" and ")}; ` +
+        `enabled: false on ${uploads.map((u) => u.id).join(" and ")} in ${path.join(args.dshHome, "cordis.patch.yml")} ` +
+        `turns ${uploads.length === 1 ? "it" : "them"} off (scripts/make-seat-home.sh writes that for a new home)`,
     );
   }
 

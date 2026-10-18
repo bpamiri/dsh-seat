@@ -2,23 +2,28 @@
 // What a seat sends to DeepSeek beyond its model requests, and how the runner
 // keeps that to the minimum by default.
 //
-// dsh ships two upload paths that are on unless a deployment turns them off
-// (dsh-base/cordis.patch.yml):
+// dsh ships three upload paths that are on unless a deployment turns them off
+// (dsh-base/cordis.patch.yml), each seen live against dsh 0.2.1-rc.2:
 //
 //   session-log-deepseek    `enabled: true` — on every official DeepSeek API
 //                           request, attaches the next suffix of the canonical
 //                           session log as the `dsh_session_log` body field
 //                           (docs/deepseek-llm-api-wire-extensions.md). Re-enabling
 //                           it later uploads the backlog recorded while it was off.
+//   plugin-package-inventory-deepseek
+//                           `enabled: true` — on every official request, the name
+//                           and version of each active plugin package as
+//                           `dsh_plugin_packages`, for DeepSeek's diagnostics; it
+//                           names any private or in-house plugin a seat runs.
 //   session-telemetry-otel  mode FEEDBACK_ONLY — explicit feedback releases the
 //                           session prefix to DeepSeek's OTel collector. A non-empty
 //                           DSH_TELEMETRY_DISABLED opts the process out; config
 //                           cannot disable that row, and `.env` files reject DSH_*.
 //
 // The runner owns the child's environment, so it switches telemetry off unless
-// the operator has expressed a choice. The session-log upload is config, so it
-// belongs in the seat home's patch (scripts/make-seat-home.sh writes it); the
-// runner only checks for it and says so in the pane when it is missing.
+// the operator has expressed a choice. The two request fields are config, so
+// they belong in the seat home's patch (scripts/make-seat-home.sh writes it);
+// the runner only checks for them and says so in the pane when either is on.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -44,21 +49,29 @@ export function dshChildEnv(env, { dshHome, permissionMode }) {
   };
 }
 
+/** The request fields a seat home can switch off, by their dsh row id. */
+export const UPLOAD_ROWS = [
+  { id: "session-log-deepseek", label: "the session log" },
+  { id: "plugin-package-inventory-deepseek", label: "the plugin package list" },
+];
+
 /**
- * Read one patch file's verdict on the session-log upload row.
+ * Read one patch file's verdict on an upload row.
  * @returns {boolean|null} true = disabled, false = enabled, null = row absent.
  *
  * Deliberately a narrow, line-based reading rather than a YAML parser (the
- * runner stays dependency-free): it looks for a top-level `- id:
- * session-log-deepseek` row and, inside it, a row-level `disabled: true` or an
- * `enabled: false` directly under the row's `config:` — not one nested deeper,
- * which would belong to some sub-feature. It only decides whether to print a
- * note, never what dsh does; anything it cannot read counts as upload on.
+ * runner stays dependency-free): it looks for a top-level `- id: <rowId>` row
+ * and, inside it, a row-level `disabled: true` or an `enabled: false` directly
+ * under the row's `config:` — not one nested deeper, which would belong to
+ * some sub-feature. It only decides whether to print a note, never what dsh
+ * does; anything it cannot read counts as upload on.
  */
-export function sessionLogVerdict(patchText) {
+export function uploadRowVerdict(patchText, rowId) {
   const lines = String(patchText).split(/\r?\n/);
+  const escaped = rowId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rowStart = new RegExp(`^- id:\\s*['"]?${escaped}['"]?\\s*(#.*)?$`);
   for (let i = 0; i < lines.length; i += 1) {
-    if (!/^- id:\s*['"]?session-log-deepseek['"]?\s*(#.*)?$/.test(lines[i])) continue;
+    if (!rowStart.test(lines[i])) continue;
     let inConfig = false;
     let childIndent = null;
     for (let j = i + 1; j < lines.length && !/^-\s/.test(lines[j]); j += 1) {
@@ -81,20 +94,32 @@ export function sessionLogVerdict(patchText) {
   return null;
 }
 
+export const sessionLogVerdict = (patchText) => uploadRowVerdict(patchText, "session-log-deepseek");
+
 /**
- * Whether this seat home turns the session-log upload off. The home-level
- * patch outranks the profile's own patch (dsh apps/cli/reference/README.md).
+ * The upload rows this seat home leaves on. The home-level patch outranks the
+ * profile's own patch (dsh apps/cli/reference/README.md); a row neither
+ * mentions keeps dsh's default, which is on.
  */
-export function sessionLogUploadDisabled({ dshHome, profile }) {
+export function uploadsLeftOn({ dshHome, profile }) {
+  const patches = [];
   for (const file of [path.join(dshHome, "cordis.patch.yml"), path.join(dshHome, "profiles", profile, "cordis.patch.yml")]) {
-    let text;
     try {
-      text = fs.readFileSync(file, "utf8");
+      patches.push(fs.readFileSync(file, "utf8"));
     } catch {
-      continue;
+      /* no patch at this layer */
     }
-    const verdict = sessionLogVerdict(text);
-    if (verdict !== null) return verdict;
   }
-  return false;
+  return UPLOAD_ROWS.filter(({ id }) => {
+    for (const text of patches) {
+      const verdict = uploadRowVerdict(text, id);
+      if (verdict !== null) return !verdict;
+    }
+    return true;
+  });
+}
+
+/** Whether this seat home turns the session-log upload off. */
+export function sessionLogUploadDisabled({ dshHome, profile }) {
+  return !uploadsLeftOn({ dshHome, profile }).some(({ id }) => id === "session-log-deepseek");
 }

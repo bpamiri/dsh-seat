@@ -5,13 +5,14 @@
 # Why this exists: dsh rewrites $DSH_HOME/profiles/<name>/cordis.yml on EVERY boot,
 # so a seat needs a home it can write to; and pointing it at your own ~/.dsh means
 # a seat boot rewrites the same profile files your own dsh sessions are using.
-# This builds a private home from your existing one — bundles and the pnpm
-# node_modules are symlinked (no copies), credentials are symlinked (not copied),
+# This builds a private home from your existing one — the pnpm bundle tree, where
+# the home has one (dsh before 0.2.1), and credentials are symlinked (not copied),
 # and only the profile directory is a real writable copy.
 #
 # It also writes the seat's own home-level cordis.patch.yml (which outranks the
-# profile layer): dsh's session-log upload to DeepSeek is turned off, and a fresh
-# sessions root stores plain JSONL so dsh-seat can read per-turn token usage.
+# profile layer): dsh's session-log and plugin-list uploads to DeepSeek are turned
+# off, and a fresh sessions root stores plain JSONL so dsh-seat can read per-turn
+# token usage.
 #
 # Usage: ./scripts/make-seat-home.sh [target-dir] [source-home]
 #   target-dir    default: <repo>/.seat-home
@@ -43,9 +44,12 @@ else
   echo "copied profile  $PROFILE  (a real, writable copy)"
 fi
 
-# Bundles + their pnpm tree are shared read-only; symlink, never copy.
-ln -sfn "$SOURCE/profiles/node_modules" "$TARGET/profiles/node_modules"
-echo "linked          $TARGET/profiles/node_modules -> $SOURCE/profiles/node_modules"
+# Bundles + their pnpm tree are shared read-only; symlink, never copy. dsh 0.2.1
+# and later resolve bundles from its own install and keep no tree here.
+if [ -e "$SOURCE/profiles/node_modules" ]; then
+  ln -sfn "$SOURCE/profiles/node_modules" "$TARGET/profiles/node_modules"
+  echo "linked          $TARGET/profiles/node_modules -> $SOURCE/profiles/node_modules"
+fi
 
 if [ -f "$SOURCE/.credentials.yaml" ]; then
   ln -sfn "$SOURCE/.credentials.yaml" "$TARGET/.credentials.yaml"
@@ -80,6 +84,12 @@ else
     echo "- id: session-log-deepseek"
     echo "  config:"
     echo "    enabled: false"
+    echo ""
+    echo "# Do not attach the names and versions of this seat's plugin packages to"
+    echo "# DeepSeek API requests (dsh-plugin-package-inventory-deepseek; on by default)."
+    echo "- id: plugin-package-inventory-deepseek"
+    echo "  config:"
+    echo "    enabled: false"
     if [ ! -e "$TARGET/sessions" ]; then
       echo ""
       echo "# Plain JSONL session logs, so dsh-seat can read per-turn token usage"
@@ -91,7 +101,7 @@ else
       echo "    compression: none"
     fi
   } > "$PATCH"
-  echo "wrote           $PATCH (session-log upload off)"
+  echo "wrote           $PATCH (session-log and plugin-list uploads off)"
 fi
 
 cat <<EOF

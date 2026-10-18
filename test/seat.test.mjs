@@ -274,7 +274,8 @@ test("the dsh child runs with telemetry off, and the pane flags a home that stil
   assert.equal(childEnv.DSH_HOME, seat.home);
   assert.equal(childEnv.DSH_PERMISSION_MODE, "workspace-write");
   assert.match(seat.output.text(), /dsh telemetry off \(DSH_TELEMETRY_DISABLED=1\)/);
-  assert.match(seat.output.text(), /leaves dsh's session-log upload on/);
+  assert.match(seat.output.text(), /official DeepSeek API requests from this seat also carry the session log and the plugin package list/);
+  assert.match(seat.output.text(), /enabled: false on session-log-deepseek and plugin-package-inventory-deepseek/);
 
   seat.input.write("/quit\n");
   await seat.done;
@@ -284,7 +285,10 @@ test("an operator's telemetry choice is kept, and a patched home gets no upload 
   let childEnv = null;
   const { home } = workspace();
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "cordis.patch.yml"), "- id: session-log-deepseek\n  config:\n    enabled: false\n");
+  fs.writeFileSync(
+    path.join(home, "cordis.patch.yml"),
+    "- id: session-log-deepseek\n  config:\n    enabled: false\n- id: plugin-package-inventory-deepseek\n  config:\n    enabled: false\n",
+  );
   const seat = startSeat({
     argv: ["--dsh-home", home],
     env: { DSH_TELEMETRY_MODE: "FEEDBACK_ONLY" },
@@ -295,7 +299,7 @@ test("an operator's telemetry choice is kept, and a patched home gets no upload 
   assert.equal(childEnv.DSH_TELEMETRY_DISABLED, undefined);
   assert.equal(childEnv.DSH_TELEMETRY_MODE, "FEEDBACK_ONLY");
   assert.match(seat.output.text(), /dsh telemetry: operator setting kept/);
-  assert.doesNotMatch(seat.output.text(), /session-log upload on/);
+  assert.doesNotMatch(seat.output.text(), /also carry/);
 
   seat.input.write("/quit\n");
   await seat.done;
