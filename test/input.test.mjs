@@ -10,9 +10,12 @@ const PASTE_END = "\x1b[201~";
 
 /** A framer that records everything it reports. */
 function framer(options = {}) {
-  const events = { submitted: [], cleared: 0, interrupts: 0, rejected: [], echoed: "" };
+  const events = { submitted: [], pasted: [], cleared: 0, interrupts: 0, rejected: [], echoed: "" };
   const f = new InputFramer({
-    onSubmit: (text) => events.submitted.push(text),
+    onSubmit: (text, meta) => {
+      events.submitted.push(text);
+      events.pasted.push(meta?.pasted === true);
+    },
     onClear: () => (events.cleared += 1),
     onInterrupt: () => (events.interrupts += 1),
     onReject: (max) => events.rejected.push(max),
@@ -102,6 +105,37 @@ test("Alt+key drops the ESC and keeps the key", () => {
   const { f, events } = framer();
   f.feed("\x1bx\r");
   assert.deepEqual(events.submitted, ["x"]);
+});
+
+test("a submission says whether any of it was pasted", () => {
+  const { f, events } = framer();
+  f.feed("/quit\r");
+  f.feed(`${PASTE_START}/exit once green, then report${PASTE_END}\r`);
+  f.feed(`note: ${PASTE_START}x${PASTE_END}\r`);
+  f.feed("typed again\r");
+  assert.deepEqual(events.submitted, ["/quit", "/exit once green, then report", "note: x", "typed again"]);
+  assert.deepEqual(events.pasted, [false, true, true, false]);
+});
+
+test("control keys inside an unfinished escape sequence still act, and ESC starts over", () => {
+  const enter = framer();
+  enter.f.feed("hi\x1b[\r");
+  assert.deepEqual(enter.events.submitted, ["hi"], "Enter is not swallowed by a dangling CSI");
+
+  const ctrlC = framer();
+  ctrlC.f.feed("abc\x1b[\x03");
+  assert.equal(ctrlC.events.cleared, 1, "Ctrl-C is not swallowed either");
+
+  const paste = framer();
+  paste.f.feed(`\x1b[${PASTE_START}From: a\nTo: b${PASTE_END}\r`);
+  assert.deepEqual(paste.events.submitted, ["From: a\nTo: b"], "a paste right after a stray ESC [ is still one message");
+});
+
+test("Alt+O followed by a key that cannot end SS3 keeps both", () => {
+  const { f, events } = framer();
+  f.feed("\x1bO x\r");
+  f.feed("a\x1bOAb\r"); // ESC O A is the SS3 up arrow: ignored
+  assert.deepEqual(events.submitted, ["O x", "ab"]);
 });
 
 test("blank submissions are ignored", () => {

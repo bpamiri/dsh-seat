@@ -39,37 +39,51 @@ async function getJson(fetchImpl, url, timeoutMs) {
   }
 }
 
+/** Ask whoami which node a session name is bound to. */
+async function whoami({ baseUrl, sessionName, fetchImpl, timeoutMs }) {
+  const url = new URL("/api/whoami", baseUrl);
+  url.searchParams.set("sessionName", sessionName);
+  url.searchParams.set("compact", "1");
+  const who = await getJson(fetchImpl, url, timeoutMs);
+  if (who.status === 404) return { ok: false, reason: "not-adopted" };
+  if (who.status === 409) return { ok: false, reason: "ambiguous: the session name is bound in more than one rig" };
+  if (!who.ok) return { ok: false, reason: `whoami HTTP ${who.status}` };
+  const identity = who.body?.identity ?? {};
+  const nodeId = typeof identity.nodeId === "string" && identity.nodeId ? identity.nodeId : null;
+  if (!nodeId) return { ok: false, reason: "whoami returned no nodeId" };
+  return {
+    ok: true,
+    nodeId,
+    rigName: typeof identity.rigName === "string" ? identity.rigName : null,
+    memberId: typeof identity.memberId === "string" ? identity.memberId : null,
+  };
+}
+
 /**
  * Resolve the seat's node and current occupant generation from the daemon.
+ * With `nodeId` already known (--node-id), only its generation is looked up.
  *
  * @returns {Promise<{ok: true, nodeId: string, generation: string|null, rigName: string|null,
  *   memberId: string|null, reason: string|null} | {ok: false, reason: string}>}
  *   `ok: false` with reason "not-adopted" is the normal answer for a pane no rig
  *   has bound yet; a missing generation comes back as `generation: null`.
  */
-export async function resolveSeatIdentity({ baseUrl, sessionName, fetchImpl = globalThis.fetch, timeoutMs = 3000 }) {
+export async function resolveSeatIdentity({ baseUrl, sessionName, nodeId = null, fetchImpl = globalThis.fetch, timeoutMs = 3000 }) {
   try {
-    const whoamiUrl = new URL("/api/whoami", baseUrl);
-    whoamiUrl.searchParams.set("sessionName", sessionName);
-    whoamiUrl.searchParams.set("compact", "1");
-    const who = await getJson(fetchImpl, whoamiUrl, timeoutMs);
-    if (who.status === 404) return { ok: false, reason: "not-adopted" };
-    if (who.status === 409) return { ok: false, reason: "ambiguous: the session name is bound in more than one rig" };
-    if (!who.ok) return { ok: false, reason: `whoami HTTP ${who.status}` };
-
-    const identity = who.body?.identity ?? {};
-    const nodeId = typeof identity.nodeId === "string" && identity.nodeId ? identity.nodeId : null;
-    if (!nodeId) return { ok: false, reason: "whoami returned no nodeId" };
+    const node = nodeId
+      ? { ok: true, nodeId, rigName: null, memberId: null }
+      : await whoami({ baseUrl, sessionName, fetchImpl, timeoutMs });
+    if (!node.ok) return node;
     const found = {
       ok: true,
-      nodeId,
+      nodeId: node.nodeId,
       generation: null,
-      rigName: typeof identity.rigName === "string" ? identity.rigName : null,
-      memberId: typeof identity.memberId === "string" ? identity.memberId : null,
+      rigName: node.rigName,
+      memberId: node.memberId,
       reason: null,
     };
 
-    const tenuresUrl = new URL(`/api/telemetry/v1/nodes/${encodeURIComponent(nodeId)}/tenures`, baseUrl);
+    const tenuresUrl = new URL(`/api/telemetry/v1/nodes/${encodeURIComponent(found.nodeId)}/tenures`, baseUrl);
     const tenures = await getJson(fetchImpl, tenuresUrl, timeoutMs);
     if (!tenures.ok) return { ...found, reason: `tenures HTTP ${tenures.status}` };
 

@@ -363,13 +363,17 @@ export async function runSeat(options) {
     },
   });
 
-  // Explicit --node-id/--generation win; otherwise ask the daemon whose
-  // activity endpoint we already post to.
-  const resolveIdentity =
-    args.nodeId || args.generation
-      ? null
-      : identityResolver ??
-        (endpoint ? () => resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName }) : null);
+  // An explicit --generation wins outright; otherwise ask the daemon whose
+  // activity endpoint we already post to — for the generation of the given
+  // --node-id, or for both.
+  const lookup = { nodeId: args.nodeId ?? null };
+  const resolveIdentity = args.generation
+    ? null
+    : identityResolver
+      ? () => identityResolver(lookup)
+      : endpoint
+        ? () => resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName, nodeId: lookup.nodeId })
+        : null;
   let identityInFlight = null;
   let identityAskedAt = 0;
 
@@ -393,6 +397,8 @@ export async function runSeat(options) {
         }
         if (shuttingDown) return;
         if (!found?.ok) continue;
+        // A generation belongs to its node: never pair another node's with --node-id.
+        if (args.nodeId && found.nodeId !== args.nodeId) continue;
         const next = { nodeId: found.nodeId, generation: found.generation ?? null };
         if (next.nodeId !== identity.nodeId || next.generation !== identity.generation) {
           identity = next;
@@ -549,7 +555,7 @@ export async function runSeat(options) {
   const pump = () => {
     // The next prompt waits for the last turn's record, so the session-log
     // rows of one turn are never read as another's.
-    if (turnDone || shuttingDown || queue.length === 0) return;
+    if (turnDone || shuttingDown || agentGone || queue.length === 0) return;
     const text = queue.shift();
     inFlight = true;
     refreshHarness();
@@ -588,6 +594,10 @@ export async function runSeat(options) {
   };
 
   const enqueue = (text) => {
+    if (agentGone) {
+      writer.line("[dsh-seat] the agent has exited; this prompt was not sent");
+      return;
+    }
     queue.push(text);
     if (inFlight || queue.length > 1) writer.line(`[queued: ${queue.length}${inFlight ? " · 1 running" : ""}]`);
     pump();
@@ -697,6 +707,10 @@ export async function runSeat(options) {
   const exited = new Promise((resolve) => {
     client.on("exit", ({ code, signal }) => {
       agentGone = true;
+      if (queue.length) {
+        writer.line(`[dsh-seat] ${queue.length} queued prompt${queue.length === 1 ? "" : "s"} dropped: the agent has exited`);
+        queue.length = 0;
+      }
       // A child that exits because WE are shutting it down is not an agent
       // failure: keep the real reason (user-quit / signal-* / stdin-closed) so
       // the sidecar records why the seat ended rather than an incidental exit.
@@ -725,14 +739,20 @@ export async function runSeat(options) {
     await client.dispose();
   }
 
+  // runSeat waits for this before returning, or the CLI's exit could beat the
+  // marker and the sidecar write and leave a dead seat recorded as ready.
+  let signalled = null;
   const onSignal = (signal) => {
+    if (signalled) return;
     exitAnnounced = true;
-    void shutdown(`signal-${signal}`).then(() => {
-      writer.line(`${RUNNER_EXIT_MARKER} (${signal})`);
-      writeState({ ready: false, exited: { reason: `signal-${signal}` } });
-      process.exitCode = 0;
-      resolveDone();
-    });
+    signalled = shutdown(`signal-${signal}`)
+      .then(() => (turnDone ? Promise.race([turnDone, sleep(5000)]) : null))
+      .then(() => {
+        writer.line(`${RUNNER_EXIT_MARKER} (${signal})`);
+        writeState({ ready: false, exited: { reason: `signal-${signal}` } });
+        process.exitCode = 0;
+        resolveDone();
+      });
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
@@ -796,11 +816,11 @@ export async function runSeat(options) {
     input,
     output,
     echo: (text) => writer.input(text),
-    onSubmit: (text) => {
+    onSubmit: (text, { pasted = false } = {}) => {
       if (shuttingDown) return;
-      // Only a single typed line can be a local command; a pasted message that
-      // happens to start with "/" goes to the agent whole.
-      if (text.startsWith("/") && !text.includes("\n") && localCommand(text.trim())) return;
+      // Only a typed line can be a local command; anything pasted — every
+      // `rig send` — goes to the agent, even when it starts with "/".
+      if (!pasted && text.startsWith("/") && !text.includes("\n") && localCommand(text.trim())) return;
       // Adoption has just bound this pane: learn the node and generation it got.
       if (CLAIM_HINT.test(text)) void refreshIdentity("adopted", [500, 1500, 4000]);
       enqueue(text);
@@ -826,6 +846,7 @@ export async function runSeat(options) {
   await Promise.race([exited, done]);
   // A turn cut short by the exit still gets its record.
   if (turnDone) await Promise.race([turnDone, sleep(5000)]);
+  if (signalled) await signalled;
 
   if (!exitAnnounced && exitReason) {
     const marker = exitReason.startsWith("agent-exit") && exitCode !== 0 ? RUNNER_ERROR_MARKER : RUNNER_EXIT_MARKER;

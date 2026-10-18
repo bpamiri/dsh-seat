@@ -256,8 +256,8 @@ posts to: `GET /api/whoami?sessionName=<seat>` for the node, then
 runner may already be bound), when OpenRig's adoption claim hint arrives (retrying for a few seconds),
 and, while no generation is known, before a turn at most once a minute. Once known, activity posts, the
 sidecar and the turn records carry `nodeId` and `generation`, and the pane prints
-`OpenRig seat: node … · generation …`. `--node-id` / `--generation` on the command line win and turn
-the lookup off.
+`OpenRig seat: node … · generation …`. A `--generation` on the command line wins and turns the lookup
+off; a `--node-id` alone still lets the runner learn that node's generation.
 
 ## Turn records and the harness fingerprint
 

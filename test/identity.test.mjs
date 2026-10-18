@@ -57,6 +57,17 @@ test("resolves the node from whoami and the newest generation from the tenures l
   assert.equal(daemon.asked[1].pathname, "/api/telemetry/v1/nodes/node%2F1/tenures");
 });
 
+test("with the node already known, only its generation is looked up", async () => {
+  const daemon = fakeDaemon({
+    "/api/telemetry/v1/nodes/node%2F9/tenures": { status: 200, body: { rows: [{ generationOrdinal: "4", generationUuid: "gen-4" }] } },
+  });
+  const found = await resolveSeatIdentity({ baseUrl: BASE, sessionName: "x@y", nodeId: "node/9", fetchImpl: daemon.fetchImpl });
+  assert.equal(found.ok, true);
+  assert.equal(found.nodeId, "node/9");
+  assert.equal(found.generation, "gen-4");
+  assert.deepEqual(daemon.asked.map((url) => url.pathname), ["/api/telemetry/v1/nodes/node%2F9/tenures"]);
+});
+
 test("an unbound pane is 'not-adopted', and an ambiguous name says so", async () => {
   const unbound = fakeDaemon({ "/api/whoami": { status: 404, body: { error: "not found" } } });
   assert.deepEqual(await resolveSeatIdentity({ baseUrl: BASE, sessionName: "x@y", fetchImpl: unbound.fetchImpl }), {

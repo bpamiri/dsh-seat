@@ -525,3 +525,55 @@ test("a skill added between turns changes the fingerprint, and each record names
   seat.input.write("/quit\n");
   await seat.done;
 });
+
+test("prompts still queued when the agent dies are dropped and said so, not sent to a dead agent", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_EXIT_ON_PROMPT: "1" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("first\nsecond\nthird\n");
+  const result = await seat.done;
+  await new Promise((resolve) => setTimeout(resolve, 300)); // anything written late would land by now
+
+  assert.equal(result.code, 1);
+  assert.equal(turnRecords(seat).length, 1, "only the prompt that reached the agent is recorded");
+  assert.match(seat.output.text(), /2 queued prompts dropped: the agent has exited/);
+  assert.doesNotMatch(seat.output.text(), /agent is not running/);
+  assert.deepEqual(seat.activity.kinds(), ["identity", "turnStart", "turnEnd"]);
+});
+
+test("a pasted one-line message that starts with / goes to the agent; only typed lines are local commands", async () => {
+  const capture = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-capture-")), "prompts.jsonl");
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "ok", FAKE_ACP_CAPTURE: capture } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  // `rig send --raw <seat> "/exit once green, then report"` pastes, then presses Enter.
+  seat.input.write("\x1b[200~/exit once green, then report\x1b[201~\r");
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "turn end" });
+
+  const prompts = fs.readFileSync(capture, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(prompts, [["/exit once green, then report"]]);
+  assert.doesNotMatch(seat.output.text(), /\[dsh-seat\] closing/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+  assert.match(seat.output.text(), /\[dsh-seat\] closing/);
+});
+
+test("a node id given alone still lets the seat learn that node's generation", async () => {
+  const asked = [];
+  const seat = startSeat({
+    argv: ["--node-id", "node-x"],
+    identityResolver: async (request) => {
+      asked.push(request);
+      return { ok: true, nodeId: "node-x", generation: "gen-x" };
+    },
+  });
+  await waitFor(() => seat.output.text().includes("OpenRig seat: node node-x · generation gen-x"), { label: "identity line" });
+  assert.deepEqual(asked[0], { nodeId: "node-x" });
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.nodeId, "node-x");
+  assert.equal(state.generation, "gen-x");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});

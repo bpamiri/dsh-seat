@@ -44,8 +44,12 @@ function codePointBytes(ch) {
  *   included; CRLF and lone CR inside a paste become LF.
  * - Backspace edits; Ctrl-C clears a half-composed message, or — with nothing
  *   composed — asks the owner to interrupt. Other control keys and escape
- *   sequences (arrows, function keys, focus reports) are ignored.
+ *   sequences (arrows, function keys, focus reports) are ignored. A control
+ *   key also ends an unfinished escape sequence, so Enter and Ctrl-C are never
+ *   swallowed by one.
  * - A message larger than `maxBytes` is refused whole at Enter, never truncated.
+ * - onSubmit(text, {pasted}) says whether any of the message was pasted, so the
+ *   owner can tell a typed command from delivered text.
  */
 export class InputFramer {
   #onSubmit;
@@ -60,6 +64,7 @@ export class InputFramer {
   #oversize = false;
   #escape = null;
   #inPaste = false;
+  #pasted = false;
   #pasteEnd = "";
   #pasteCR = false;
   #afterCR = false;
@@ -138,6 +143,16 @@ export class InputFramer {
   }
 
   #escapeChar(ch) {
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) {
+      // A control key ends the unfinished sequence, then acts: Enter submits,
+      // Ctrl-C clears or interrupts, ESC starts a new sequence.
+      const unfinished = this.#escape;
+      this.#escape = null;
+      if (unfinished === "\x1bO") this.#keyChar("O"); // that was Alt+O
+      this.#keyChar(ch);
+      return;
+    }
     this.#escape += ch;
     const seq = this.#escape;
     if (seq.length === 2) {
@@ -148,16 +163,22 @@ export class InputFramer {
       return;
     }
     if (seq[1] === "O") {
-      // SS3 is ESC O plus one byte (F1–F4, keypad keys): complete, ignored.
       this.#escape = null;
+      // SS3 is ESC O plus one final byte (F1–F4, keypad keys): ignored. Any
+      // other byte means the ESC O was Alt+O: keep the O and the key.
+      if (code >= 0x40 && code <= 0x7e) return;
+      this.#keyChar("O");
+      this.#keyChar(ch);
       return;
     }
-    const code = ch.charCodeAt(0);
     if (code >= 0x40 && code <= 0x7e) {
       // A complete CSI sequence. Only the paste start means anything here;
       // arrows, Home/End and a stray paste end are ignored.
       this.#escape = null;
-      if (seq === PASTE_START) this.#inPaste = true;
+      if (seq === PASTE_START) {
+        this.#inPaste = true;
+        this.#pasted = true;
+      }
       return;
     }
     if (seq.length >= MAX_ESCAPE_LENGTH) this.#escape = null;
@@ -243,6 +264,7 @@ export class InputFramer {
 
   #submit() {
     const oversize = this.#oversize;
+    const pasted = this.#pasted;
     const text = this.#text.replace(/\n+$/, "");
     this.#reset();
     this.#pendingEcho += "\n";
@@ -251,13 +273,14 @@ export class InputFramer {
       this.#onReject(this.#maxBytes);
       return;
     }
-    if (text.trim()) this.#onSubmit(text);
+    if (text.trim()) this.#onSubmit(text, { pasted });
   }
 
   #reset() {
     this.#text = "";
     this.#bytes = 0;
     this.#oversize = false;
+    this.#pasted = false;
   }
 
   #flushEcho() {
