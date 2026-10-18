@@ -39,6 +39,15 @@ test("sessionLogVerdict reads the session-log row of a patch", () => {
   assert.equal(sessionLogVerdict("- id: other\n  config: {}\n"), null);
 });
 
+test("only the row's own switch counts, not an enabled: false nested deeper in its config", () => {
+  const nested = "- id: session-log-deepseek\n  config:\n    enabled: true\n    redact:\n      enabled: false\n";
+  assert.equal(sessionLogVerdict(nested), false);
+  const nestedOnly = "- id: session-log-deepseek\n  config:\n    redact:\n      enabled: false\n";
+  assert.equal(sessionLogVerdict(nestedOnly), false);
+  const disabledInConfig = "- id: session-log-deepseek\n  config:\n    redact:\n      level: 1\n    enabled: false\n";
+  assert.equal(sessionLogVerdict(disabledInConfig), true);
+});
+
 test("the home-level patch outranks the profile patch", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-privacy-"));
   assert.equal(sessionLogUploadDisabled({ dshHome: home, profile: "acp" }), false, "no patch: dsh's default is on");
@@ -76,6 +85,15 @@ test("make-seat-home writes a seat patch: upload off, plain JSONL on a fresh roo
   const rerun = execFileSync("sh", [MAKE_SEAT_HOME, target, source], { encoding: "utf8" });
   assert.match(rerun, /seat patch already present/);
   assert.equal(fs.readFileSync(path.join(target, "cordis.patch.yml"), "utf8"), "# mine\n");
+});
+
+test("make-seat-home writes a backslash in the seat path as it is", () => {
+  const source = fakeSourceHome();
+  const target = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-target-")), "a\\tb");
+  execFileSync("sh", [MAKE_SEAT_HOME, target, source], { encoding: "utf8" });
+  const patch = fs.readFileSync(path.join(target, "cordis.patch.yml"), "utf8");
+  assert.ok(patch.includes(`root: '${path.join(target, "sessions")}'`), patch);
+  assert.ok(!patch.includes("\t"), "no tab where the path had a backslash");
 });
 
 test("make-seat-home does not switch compression on an existing sessions root", () => {

@@ -50,15 +50,31 @@ export function dshChildEnv(env, { dshHome, permissionMode }) {
  *
  * Deliberately a narrow, line-based reading rather than a YAML parser (the
  * runner stays dependency-free): it looks for a top-level `- id:
- * session-log-deepseek` row and, inside it, `enabled: false` or `disabled: true`.
- * It only decides whether to print a note, never what dsh does.
+ * session-log-deepseek` row and, inside it, a row-level `disabled: true` or an
+ * `enabled: false` directly under the row's `config:` — not one nested deeper,
+ * which would belong to some sub-feature. It only decides whether to print a
+ * note, never what dsh does; anything it cannot read counts as upload on.
  */
 export function sessionLogVerdict(patchText) {
   const lines = String(patchText).split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     if (!/^- id:\s*['"]?session-log-deepseek['"]?\s*(#.*)?$/.test(lines[i])) continue;
+    let inConfig = false;
+    let childIndent = null;
     for (let j = i + 1; j < lines.length && !/^-\s/.test(lines[j]); j += 1) {
-      if (/^\s+enabled:\s*false\b/.test(lines[j]) || /^\s+disabled:\s*true\b/.test(lines[j])) return true;
+      const line = lines[j];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const indent = line.length - line.trimStart().length;
+      if (indent <= 2) {
+        // A key of the row itself ("- " puts them at column 2).
+        if (/^\s*disabled:\s*true\b/.test(line)) return true;
+        inConfig = /^\s*config:\s*(#.*)?$/.test(line);
+        childIndent = null;
+        continue;
+      }
+      if (!inConfig) continue;
+      childIndent ??= indent;
+      if (indent === childIndent && /^\s*enabled:\s*false\b/.test(line)) return true;
     }
     return false;
   }

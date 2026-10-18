@@ -62,7 +62,7 @@ Against real `dsh 0.2.0-rc.2` (`acp` profile, Node 24.11):
 | Unit/integration suite (`npm test`) | ✅ 25/25 at the time |
 
 What has changed since that run — multi-line input framing, privacy defaults, seat identity lookup, and
-turn records with a harness fingerprint — is covered by the suite (now 81 tests) and was checked
+turn records with a harness fingerprint — is covered by the suite (now 94 tests) and was checked
 against the dsh (`687f282e`) and OpenRig source it relies on, but has **not yet been run against a live
 dsh or daemon**.
 
@@ -308,7 +308,8 @@ effort are left out on purpose, so one harness can be compared across models. It
 every turn; a change is printed in the pane (`harness changed 40107c65a5a2 → 098028e9d9d8 (+1 files)`),
 the sidecar carries the current one, and each distinct fingerprint's manifest — file labels, sizes and
 sha256s, never content — is kept at `<state-root>/<seat>/harness/<fingerprint>.json`, so any two can be
-diffed. Secrets (`.env`, credentials) are never read.
+diffed. Files that commonly hold secrets (`.env*`, credential files, private keys) are never read, and
+dependency and cache directories inside a skill (`node_modules`, `.venv`, `__pycache__`, …) are skipped.
 
 Together they are the measurement half of a self-improvement loop: change a seat's harness, then keep
 the change if turns under the new fingerprint use fewer tokens or fail fewer tool calls. Outcome signals
@@ -325,7 +326,7 @@ jq -s 'map(select(.usage)) | group_by(.harnessFingerprint)
 ## Tests
 
 ```bash
-npm test                                        # 81 tests: no model, no network, no dsh required
+npm test                                        # 94 tests: no model, no network, no dsh required
 ./scripts/make-seat-home.sh                     # once, for the live paths below
 npm run probe                                   # live ACP handshake (initialize/new/close, real dsh)
 PROBE_PROMPT="reply with one word" npm run probe # live model turn — spends a few tokens

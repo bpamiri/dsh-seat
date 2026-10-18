@@ -24,8 +24,9 @@
 // Files are named by role, not location (dsh-home/…, project/…, skills/…), so
 // seats with the same harness content share a fingerprint wherever their
 // homes live. Content is hashed, never copied; the manifest lists each file's
-// size and sha256 so two fingerprints can be diffed. Secrets (.env,
-// credentials) are not harness and are never read.
+// size and sha256 so two fingerprints can be diffed. Files that commonly hold
+// secrets are not harness and are never read, nor are dependency and cache
+// directories inside a skill.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -34,8 +35,10 @@ import { createHash } from "node:crypto";
 
 export const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "AGENTS.local.md", "CLAUDE.local.md"];
 
-// Dependencies and VCS internals inside a skill are not the skill.
-const SKIPPED_NAMES = new Set([".git", "node_modules"]);
+// Dependencies, caches and VCS internals inside a skill are not the skill.
+const SKIPPED_NAMES = new Set([".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".cache"]);
+// Nor is a secret that happens to sit beside it; it is never even read.
+const SECRET_FILE = /^(?:\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|\.credentials\.(?:ya?ml|json)|credentials\.json|id_(?:rsa|dsa|ecdsa|ed25519))$|\.(?:pem|key|p12|pfx)$/;
 const MAX_DEPTH = 12;
 
 export function defaultAgentsHome(env = process.env) {
@@ -176,6 +179,7 @@ export class HarnessFingerprinter {
     // Symlinks are followed, as a skill library is often linked in; a link
     // back to an ancestor directory is not.
     const visit = (current, parts, ancestors) => {
+      if (budget.truncated) return; // past the budget the result is settled
       let real;
       try {
         real = fs.realpathSync(current);
@@ -191,6 +195,7 @@ export class HarnessFingerprinter {
         return;
       }
       for (const name of names) {
+        if (budget.truncated) return;
         if (SKIPPED_NAMES.has(name) || (parts.length === 0 && skipTop.includes(name))) continue;
         const full = path.join(current, name);
         let stat;
@@ -200,7 +205,7 @@ export class HarnessFingerprinter {
           continue;
         }
         if (stat.isDirectory()) visit(full, [...parts, name], inside);
-        else if (stat.isFile()) this.#add(entries, budget, [label, ...parts, name].join("/"), full, stat);
+        else if (stat.isFile() && !SECRET_FILE.test(name)) this.#add(entries, budget, [label, ...parts, name].join("/"), full, stat);
       }
     };
     visit(dir, [], new Set());

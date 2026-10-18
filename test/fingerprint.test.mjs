@@ -69,6 +69,24 @@ test("the harness is every file dsh reads, named by role; secrets, .system and d
   assert.ok(sources.files.some((source) => source.label === "dsh-home/profiles/acp/cordis.patch.yml"));
 });
 
+test("files that hold secrets, and dependency or cache directories, are never read from skill trees", () => {
+  const tree = seatTree();
+  const skill = path.join(tree.dshHome, "skills", "deploy");
+  write(path.join(skill, "SKILL.md"), "---\nname: deploy\n---\n");
+  for (const secret of [".env", ".env.production", "server.pem", "deploy.key", "id_ed25519", ".netrc", ".credentials.yaml"]) {
+    write(path.join(skill, secret), "secret");
+  }
+  write(path.join(skill, ".venv", "lib", "site.py"), "venv");
+  write(path.join(skill, "scripts", "__pycache__", "x.pyc"), "cache");
+  write(path.join(skill, "scripts", "run.py"), "print('deploy')");
+
+  const labels = fingerprinter(tree).compute(SETTINGS).files.map((entry) => entry.label);
+  assert.deepEqual(
+    labels.filter((label) => label.startsWith("skills/dsh-home/deploy/")),
+    ["skills/dsh-home/deploy/SKILL.md", "skills/dsh-home/deploy/scripts/run.py"],
+  );
+});
+
 test("the same harness content in other homes has the same fingerprint", () => {
   const one = seatTree();
   const two = seatTree();

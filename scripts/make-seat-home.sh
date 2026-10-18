@@ -86,7 +86,8 @@ else
       echo "# without zstd. Set only on a fresh sessions root."
       echo "- id: session-persistence-jsonl"
       echo "  config:"
-      echo "    root: '$SESSIONS_YAML'"
+      # printf, not echo: dash's echo would turn a backslash in the path into an escape.
+      printf "    root: '%s'\n" "$SESSIONS_YAML"
       echo "    compression: none"
     fi
   } > "$PATCH"
