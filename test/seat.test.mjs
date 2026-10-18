@@ -9,6 +9,17 @@ import { runSeat, parseArgs, RUNNER_READY_MARKER, RUNNER_ERROR_MARKER } from "..
 import { sidecarPath, readSidecar } from "../src/state.mjs";
 import { fakeAgentFactory, recordingActivity, captureStream, openInput, waitFor } from "./helpers.mjs";
 
+// Seats a test leaves running (an assertion failed before its /quit) are
+// closed here, so the failure is reported instead of the test file hanging.
+const running = new Set();
+test.afterEach(async () => {
+  for (const seat of running) {
+    seat.input.end();
+    await Promise.race([seat.done, new Promise((resolve) => setTimeout(resolve, 5000))]);
+  }
+  running.clear();
+});
+
 function workspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-test-"));
   return { dir, stateRoot: path.join(dir, "state"), home: path.join(dir, "dsh-home") };
@@ -57,7 +68,9 @@ function startSeat({
     activityFactory: () => activity,
     identityResolver,
   });
-  return { args, input, output, activity, done, dir, stateRoot, home };
+  const seat = { args, input, output, activity, done, dir, stateRoot, home };
+  running.add(seat);
+  return seat;
 }
 
 test("parseArgs applies seat defaults and rejects nonsense", () => {
