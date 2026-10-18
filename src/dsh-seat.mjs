@@ -351,7 +351,10 @@ export async function runSeat(options) {
     });
   };
 
-  const endpoint = args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null;
+  // The daemon's activity endpoint: read now and, while missing, again whenever
+  // the seat looks up its identity — a seat can start before the daemon has
+  // ever run, and adoption's claim hint is proof that it runs now.
+  let endpoint = args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null;
   const activity = activityFactory({
     sessionName: args.sessionName,
     nodeId: identity.nodeId,
@@ -363,17 +366,27 @@ export async function runSeat(options) {
     },
   });
 
+  const findEndpoint = () => {
+    if (endpoint || !args.activity) return;
+    endpoint = readActivityEndpoint(defaultOpenRigHome(env));
+    if (!endpoint) return;
+    activity.setEndpoint?.(endpoint);
+    writer.line(`[dsh-seat] activity reporting on: found the OpenRig endpoint ${endpoint.baseUrl}`);
+    if (ready && sessionId) activity.sessionIdentity({ sessionId });
+  };
+
   // An explicit --generation wins outright; otherwise ask the daemon whose
-  // activity endpoint we already post to — for the generation of the given
-  // --node-id, or for both.
+  // activity endpoint we post to — for the generation of the given --node-id,
+  // or for both.
   const lookup = { nodeId: args.nodeId ?? null };
   const resolveIdentity = args.generation
     ? null
     : identityResolver
       ? () => identityResolver(lookup)
-      : endpoint
-        ? () => resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName, nodeId: lookup.nodeId })
-        : null;
+      : () =>
+          endpoint
+            ? resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName, nodeId: lookup.nodeId })
+            : { ok: false, reason: "no OpenRig activity endpoint yet" };
   let identityInFlight = null;
   let identityAskedAt = 0;
 
@@ -383,6 +396,7 @@ export async function runSeat(options) {
    * seat: callers fire and forget, and a failure only leaves activity untrusted.
    */
   const refreshIdentity = (reason, retryDelays = []) => {
+    findEndpoint();
     if (!resolveIdentity || identityInFlight) return identityInFlight;
     identityAskedAt = Date.now();
     identityInFlight = (async () => {
@@ -467,7 +481,9 @@ export async function runSeat(options) {
   writer.line(`[dsh-seat] launch ${args.launchId}${activity.enabled ? "" : " · activity reporting off"}`);
 
   if (!args.activity) writer.line("[dsh-seat] activity reporting disabled by flag");
-  else if (!activity.enabled) writer.line("[dsh-seat] activity reporting off (no OpenRig activity endpoint found)");
+  else if (!activity.enabled) {
+    writer.line("[dsh-seat] activity reporting off for now: no OpenRig activity endpoint yet (looked for again at adoption)");
+  }
 
   writer.line(
     telemetryChosen(env)
