@@ -191,3 +191,38 @@ test("context usage and local commands are surfaced to the operator", async () =
   seat.input.write("/quit\n");
   await seat.done;
 });
+
+test("a multi-line rig send reaches the agent as one prompt, not one per line", async () => {
+  const capture = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "dsh-seat-capture-")), "prompts.jsonl");
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "got it", FAKE_ACP_CAPTURE: capture } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  // OpenRig pastes the enveloped message whole (paste-buffer -r -p), then Enter.
+  const envelope = "From: orch-lead@test-rig\nTo: dev1-dsh@test-rig\n\nImplement X.\nThen run the tests.";
+  seat.input.write(`\x1b[200~${envelope}\x1b[201~\r`);
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "turn end" });
+
+  const prompts = fs.readFileSync(capture, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(prompts, [[envelope]]);
+  assert.equal((seat.output.text().match(/── turn end/g) ?? []).length, 1);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("Ctrl-C cancels the turn in flight, and is harmless when idle", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "working", FAKE_ACP_HOLD_MS: "10000" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("\x03");
+  await waitFor(() => seat.output.text().includes("Ctrl-C: no turn is running"), { label: "idle Ctrl-C" });
+
+  seat.input.write("long job\n");
+  await waitFor(() => seat.output.text().includes("working"), { label: "turn in flight" });
+  seat.input.write("\x03");
+  await waitFor(() => seat.output.text().includes("── turn end (cancelled) ──"), { label: "cancelled turn" });
+  assert.match(seat.output.text(), /cancel requested \(Ctrl-C\)/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});

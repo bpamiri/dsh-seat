@@ -13,6 +13,8 @@
 //   FAKE_ACP_EXIT_ON_PROMPT   exit(3) instead of answering the prompt
 //   FAKE_ACP_GARBAGE          print a non-JSON line on stdout
 //   FAKE_ACP_CAPTURE          path to write the received session/prompt texts
+//   FAKE_ACP_HOLD_MS          hold each prompt open this long; session/cancel
+//                             ends it early with stopReason "cancelled"
 
 import fs from "node:fs";
 import readline from "node:readline";
@@ -24,6 +26,22 @@ const notify = (method, params) => write({ jsonrpc: "2.0", method, params });
 
 let seq = 1000;
 const awaiting = new Map();
+let releaseHold = null;
+
+/** Wait `ms`, or until session/cancel arrives. Resolves true when cancelled. */
+function hold(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      releaseHold = null;
+      resolve(false);
+    }, ms);
+    releaseHold = () => {
+      clearTimeout(timer);
+      releaseHold = null;
+      resolve(true);
+    };
+  });
+}
 
 function serverRequest(method, params) {
   const id = ++seq;
@@ -84,6 +102,11 @@ async function handlePrompt(msg) {
     notify("session/update", { sessionId, update: { sessionUpdate: "usage_update", used: 250, size: 1000 } });
   }
 
+  if (process.env.FAKE_ACP_HOLD_MS && (await hold(Number(process.env.FAKE_ACP_HOLD_MS)))) {
+    write({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "cancelled" } });
+    return;
+  }
+
   write({ jsonrpc: "2.0", id: msg.id, result: { stopReason: process.env.FAKE_ACP_STOP_REASON ?? "end_turn" } });
 }
 
@@ -139,6 +162,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       break;
     case "session/close":
       write({ jsonrpc: "2.0", id: msg.id, result: {} });
+      break;
+    case "session/cancel":
+      // A notification: no response, just end any held prompt.
+      releaseHold?.();
       break;
     default:
       write({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `no such method ${msg.method}` } });

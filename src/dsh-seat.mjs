@@ -10,7 +10,8 @@
 // follows OpenRig's pi-runner shape so Phase 2 (a first-class `dsh` runtime
 // adapter) can lift it unchanged:
 //
-//   pane stdin (rig send / human typing) ──▶ ACP session/prompt   (queued; one
+//   pane stdin (rig send / human typing) ──▶ ACP session/prompt   (one prompt per
+//                                            Enter, pastes kept whole; queued, one
 //                                            prompt may be in flight at a time)
 //   ACP session/update                   ──▶ human-readable pane mirror
 //   ACP session/request_permission       ──▶ answered from the seat's posture
@@ -23,11 +24,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { AcpClient } from "./acp.mjs";
+import { attachPaneInput } from "./input.mjs";
 import {
   normalizePosture,
   permissionDecision,
@@ -76,6 +77,13 @@ export class PaneWriter {
     this.#out.write(chunk);
     this.#midLine = !chunk.endsWith("\n");
     if (this.#styled && !this.#midLine) this.#out.write("\x1b[0m");
+  }
+
+  /** Echoed pane input (raw mode turns the terminal's own echo off). */
+  input(chunk) {
+    if (!chunk) return;
+    this.#out.write(chunk);
+    this.#midLine = !chunk.endsWith("\n");
   }
 
   /** A framed line of our own (markers, tool summaries, errors). */
@@ -516,18 +524,33 @@ export async function runSeat(options) {
     return { code: 1, sessionId };
   }
 
-  const rl = readline.createInterface({ input, crlfDelay: Infinity, terminal: false });
-  rl.on("line", (rawLine) => {
-    const line = rawLine.replace(/\r$/, "");
-    if (shuttingDown) return;
-    if (!line.trim()) return;
-    if (line.startsWith("/") && localCommand(line.trim())) return;
-    enqueue(line);
-  });
-  // A seat whose pane input is gone has no way to receive work: end honestly
-  // rather than sit frozen holding a session open.
-  rl.on("close", () => {
-    if (!shuttingDown) void shutdown("stdin-closed").then(resolveDone);
+  const paneInput = attachPaneInput({
+    input,
+    output,
+    echo: (text) => writer.input(text),
+    onSubmit: (text) => {
+      if (shuttingDown) return;
+      // Only a single typed line can be a local command; a pasted message that
+      // happens to start with "/" goes to the agent whole.
+      if (text.startsWith("/") && !text.includes("\n") && localCommand(text.trim())) return;
+      enqueue(text);
+    },
+    onInterrupt: () => {
+      if (inFlight && sessionId) {
+        client.cancel({ sessionId });
+        writer.line("[dsh-seat] cancel requested (Ctrl-C)");
+      } else {
+        writer.line("[dsh-seat] Ctrl-C: no turn is running · /quit closes the seat");
+      }
+    },
+    onReject: (maxBytes) => {
+      writer.line(`[dsh-seat] input rejected: larger than ${maxBytes} bytes — send a smaller message`);
+    },
+    // A seat whose pane input is gone has no way to receive work: end honestly
+    // rather than sit frozen holding a session open.
+    onClose: () => {
+      if (!shuttingDown) void shutdown("stdin-closed").then(resolveDone);
+    },
   });
 
   await Promise.race([exited, done]);
@@ -540,7 +563,7 @@ export async function runSeat(options) {
 
   process.off("SIGINT", onSignal);
   process.off("SIGTERM", onSignal);
-  rl.close();
+  paneInput.detach();
   return { code: exitCode, sessionId };
 }
 
