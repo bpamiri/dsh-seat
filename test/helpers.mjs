@@ -24,13 +24,21 @@ export function fakeAgentFactory(env = {}) {
 /** Records activity posts instead of hitting the daemon. */
 export function recordingActivity() {
   const posts = [];
+  const identities = [];
+  let current = { nodeId: null, generation: null };
   return {
     enabled: true,
     posts,
-    turnStart: (subtype = null) => posts.push({ kind: "turnStart", subtype }),
-    turnEnd: (subtype = null) => posts.push({ kind: "turnEnd", subtype }),
-    sessionIdentity: ({ sessionId }) => posts.push({ kind: "identity", sessionId }),
-    attention: (reason) => posts.push({ kind: "attention", reason }),
+    identities,
+    // Each post records the identity it would have been stamped with.
+    turnStart: (subtype = null) => posts.push({ kind: "turnStart", subtype, ...current }),
+    turnEnd: (subtype = null) => posts.push({ kind: "turnEnd", subtype, ...current }),
+    sessionIdentity: ({ sessionId }) => posts.push({ kind: "identity", sessionId, ...current }),
+    attention: (reason) => posts.push({ kind: "attention", reason, ...current }),
+    setIdentity: (identity) => {
+      current = { nodeId: identity.nodeId ?? null, generation: identity.generation ?? null };
+      identities.push(current);
+    },
     kinds: () => posts.map((post) => post.kind),
   };
 }

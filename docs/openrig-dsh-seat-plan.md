@@ -118,6 +118,8 @@ throwaway rig and driven with `rig send` / `rig capture`, with the agent writing
 Two gaps the live adoption exposed (both Phase 2 work) are recorded in that README's
 "Field notes from the first live adoption": discovery fingerprints a dsh pane as `unknown`, and
 activity hooks arrive without an occupant generation so the daemon falls back to window sampling.
+(The second has since been addressed in the runner, which now looks up its node and generation after
+adoption — see the README's "Seat identity".)
 
 Then seat it with the adoption flow (verified: `rig adopt` calls
 `/api/rigs/import/materialize`, which "create[s] rig topology **without launching**"

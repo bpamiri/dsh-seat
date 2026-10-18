@@ -10,12 +10,15 @@
 // follows OpenRig's pi-runner shape so Phase 2 (a first-class `dsh` runtime
 // adapter) can lift it unchanged:
 //
-//   pane stdin (rig send / human typing) ──▶ ACP session/prompt   (queued; one
+//   pane stdin (rig send / human typing) ──▶ ACP session/prompt   (one prompt per
+//                                            Enter, pastes kept whole; queued, one
 //                                            prompt may be in flight at a time)
 //   ACP session/update                   ──▶ human-readable pane mirror
 //   ACP session/request_permission       ──▶ answered from the seat's posture
 //   turn boundaries                      ──▶ POST /api/activity/hooks
 //   lifecycle truth                      ──▶ <stateRoot>/<session>/runner-state.json
+//   each turn's usage (dsh session log)  ──▶ <stateRoot>/<session>/turns.jsonl, stamped
+//                                            with the harness fingerprint that ran it
 //
 // Honest failure: a dead dsh child prints EXIT/ERROR and records `exited` in the
 // sidecar — never a silently frozen pane (pi-runner.ts:9-13, Rule 15).
@@ -23,11 +26,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { AcpClient } from "./acp.mjs";
+import { attachPaneInput } from "./input.mjs";
 import {
   normalizePosture,
   permissionDecision,
@@ -36,7 +39,11 @@ import {
   describeDecision,
 } from "./permissions.mjs";
 import { ActivityPoster, readActivityEndpoint, defaultOpenRigHome } from "./activity.mjs";
-import { sidecarPath, writeSidecar } from "./state.mjs";
+import { dshChildEnv, telemetryChosen, sessionLogUploadDisabled } from "./privacy.mjs";
+import { CLAIM_HINT, resolveSeatIdentity } from "./identity.mjs";
+import { HarnessFingerprinter, defaultAgentsHome, diffHarness } from "./fingerprint.mjs";
+import { SessionLogTail, TAKE_WAITS_MS, TURN_RECORD_SCHEMA, turnUsageFields } from "./usage.mjs";
+import { appendJsonl, seatFile, sidecarPath, writeJsonAtomic, writeSidecar } from "./state.mjs";
 
 export const RUNNER_READY_MARKER = "[dsh-runner] READY";
 export const RUNNER_EXIT_MARKER = "[dsh-runner] EXITED";
@@ -44,6 +51,17 @@ export const RUNNER_ERROR_MARKER = "[dsh-runner] ERROR";
 
 const VERSION = "0.1.0";
 const DEFAULT_PROFILE = "acp";
+
+/** A delay that never holds the process open on its own. */
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+const count = (n) => n.toLocaleString("en-US");
 
 // ── Pane output ─────────────────────────────────────────────────────────────
 // ACP streams deltas, so the writer tracks whether the pane is mid-line before
@@ -78,6 +96,13 @@ export class PaneWriter {
     if (this.#styled && !this.#midLine) this.#out.write("\x1b[0m");
   }
 
+  /** Echoed pane input (raw mode turns the terminal's own echo off). */
+  input(chunk) {
+    if (!chunk) return;
+    this.#out.write(chunk);
+    this.#midLine = !chunk.endsWith("\n");
+  }
+
   /** A framed line of our own (markers, tool summaries, errors). */
   line(text = "") {
     if (this.#midLine) {
@@ -98,6 +123,7 @@ export function parseArgs(argv, env = process.env) {
     dshCommand: "dsh",
     profile: DEFAULT_PROFILE,
     stateRoot: path.join(defaultOpenRigHome(env), "state", "dsh"),
+    sessionsRoot: null,
     launchId: null,
     posture: "floor",
     session: null,
@@ -121,6 +147,7 @@ export function parseArgs(argv, env = process.env) {
     "--dsh-command",
     "--profile",
     "--state-root",
+    "--sessions-root",
     "--launch-id",
     "--posture",
     "--session",
@@ -158,6 +185,7 @@ export function parseArgs(argv, env = process.env) {
         case "--dsh-command": args.dshCommand = value; break;
         case "--profile": args.profile = value; break;
         case "--state-root": args.stateRoot = value; break;
+        case "--sessions-root": args.sessionsRoot = value; break;
         case "--launch-id": args.launchId = value; break;
         case "--posture": args.posture = value; break;
         case "--session": args.session = value; break;
@@ -191,6 +219,7 @@ export function parseArgs(argv, env = process.env) {
   args.cwd = path.resolve(args.cwd);
   args.dshHome = path.resolve(args.dshHome);
   args.stateRoot = path.resolve(args.stateRoot);
+  args.sessionsRoot = path.resolve(args.sessionsRoot ?? path.join(args.dshHome, "sessions"));
   if (!args.sessionName) args.sessionName = `${path.basename(args.cwd)}-dsh`;
   if (!args.launchId) args.launchId = randomUUID();
   args.posture = normalizePosture(args.posture);
@@ -207,7 +236,8 @@ Options:
   --dsh-home <dir>        DSH_HOME for this seat (default: $DSH_HOME, else ~/.dsh)
   --dsh-command <cmd>     dsh executable (default: dsh)
   --profile <name>        dsh profile to boot (default: acp)
-  --state-root <dir>      sidecar root (default: $OPENRIG_HOME/state/dsh)
+  --state-root <dir>      sidecar and turn-record root (default: $OPENRIG_HOME/state/dsh)
+  --sessions-root <dir>   dsh session-log root, read for turn usage (default: <dsh-home>/sessions)
   --launch-id <id>        launch-attempt id stamped into the sidecar (default: random)
   --posture <p>           floor | auto | full_bypass (default: floor)
   --session <id>          resume this dsh session instead of creating a new one
@@ -226,6 +256,22 @@ Options:
 Local pane commands: /help /session /usage /cancel /quit
 `;
 
+/** One pane line for a recorded turn's usage. */
+function describeUsage(fields) {
+  const { usage, tools } = fields;
+  const parts = [
+    `${fields.llmCalls} model call${fields.llmCalls === 1 ? "" : "s"}`,
+    `in ${count(usage.inputTokens)}`,
+    `cache read ${count(usage.cacheReadTokens)}`,
+  ];
+  if (usage.cacheWriteTokens) parts.push(`cache write ${count(usage.cacheWriteTokens)}`);
+  parts.push(`out ${count(usage.outputTokens)}`);
+  if (tools.calls) parts.push(`${tools.calls} tool call${tools.calls === 1 ? "" : "s"}${tools.errors ? ` (${tools.errors} failed)` : ""}`);
+  const models = Object.keys(fields.byModel);
+  if (models.length) parts.push(models.join(", "));
+  return `${parts.join(" · ")}${fields.usageSource === "session-log" ? "" : ` · partial: ${fields.usageNote}`}`;
+}
+
 // ── The seat ────────────────────────────────────────────────────────────────
 
 /**
@@ -243,6 +289,7 @@ export async function runSeat(options) {
     env = process.env,
     clientFactory = (opts) => new AcpClient(opts),
     activityFactory = (opts) => new ActivityPoster(opts),
+    identityResolver = null,
     now = () => new Date().toISOString(),
   } = options;
 
@@ -258,10 +305,34 @@ export async function runSeat(options) {
   let exitAnnounced = false;
   let ready = false;
   let lastUsagePercent = null;
+  let lastContext = null;
+  let agentGone = false;
 
-  const mcpServers = args.mcpServersFile ? JSON.parse(fs.readFileSync(args.mcpServersFile, "utf8")) : [];
+  const mcpServersText = args.mcpServersFile ? fs.readFileSync(args.mcpServersFile, "utf8") : null;
+  const mcpServers = mcpServersText === null ? [] : JSON.parse(mcpServersText);
 
+  // The OpenRig seat this pane is: given on the command line, or learned after
+  // adoption (see refreshIdentity below).
+  let identity = { nodeId: args.nodeId ?? null, generation: args.generation ?? null };
+
+  // The harness each turn runs with (src/fingerprint.mjs), and where turns are
+  // recorded with their usage (src/usage.mjs).
+  const fingerprinter = new HarnessFingerprinter({
+    cwd: args.cwd,
+    dshHome: args.dshHome,
+    agentsHome: defaultAgentsHome(env),
+    profile: args.profile,
+  });
+  let harness = null;
+  let agentInfo = null;
+  let logTail = null;
+  const turnsFile = seatFile(args, "turns.jsonl");
+
+  // Each write replaces the whole sidecar, so `exited` is carried forward
+  // rather than dropped by a mid-run write that does not mention it.
+  let lastExited = null;
   const writeState = (patch = {}) => {
+    if ("exited" in patch) lastExited = patch.exited;
     writeSidecar(sidecar, {
       ready,
       launchId: args.launchId,
@@ -270,22 +341,124 @@ export async function runSeat(options) {
       posture,
       permissionMode,
       sessionId,
+      nodeId: identity.nodeId,
+      generation: identity.generation,
+      harnessFingerprint: harness?.fingerprint ?? null,
       runnerPid: process.pid,
       updatedAt: now(),
+      exited: lastExited,
       ...patch,
     });
   };
 
+  const endpoint = args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null;
   const activity = activityFactory({
     sessionName: args.sessionName,
-    nodeId: args.nodeId,
-    generation: args.generation,
+    nodeId: identity.nodeId,
+    generation: identity.generation,
     runtime: args.runtimeLabel,
-    endpoint: args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null,
+    endpoint,
     onError: (err) => {
       if (args.verbose) errorOutput.write(`[dsh-seat] activity post failed: ${err.message}\n`);
     },
   });
+
+  // An explicit --generation wins outright; otherwise ask the daemon whose
+  // activity endpoint we already post to — for the generation of the given
+  // --node-id, or for both.
+  const lookup = { nodeId: args.nodeId ?? null };
+  const resolveIdentity = args.generation
+    ? null
+    : identityResolver
+      ? () => identityResolver(lookup)
+      : endpoint
+        ? () => resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName, nodeId: lookup.nodeId })
+        : null;
+  let identityInFlight = null;
+  let identityAskedAt = 0;
+
+  /**
+   * Ask the daemon which node and occupant generation this pane is bound to,
+   * retrying after each delay until the generation is known. Never blocks the
+   * seat: callers fire and forget, and a failure only leaves activity untrusted.
+   */
+  const refreshIdentity = (reason, retryDelays = []) => {
+    if (!resolveIdentity || identityInFlight) return identityInFlight;
+    identityAskedAt = Date.now();
+    identityInFlight = (async () => {
+      for (const delay of [0, ...retryDelays]) {
+        if (shuttingDown) return;
+        if (delay) await sleep(delay);
+        let found;
+        try {
+          found = await resolveIdentity();
+        } catch (err) {
+          found = { ok: false, reason: err.message };
+        }
+        if (shuttingDown) return;
+        if (!found?.ok) continue;
+        // A generation belongs to its node: never pair another node's with --node-id.
+        if (args.nodeId && found.nodeId !== args.nodeId) continue;
+        const next = { nodeId: found.nodeId, generation: found.generation ?? null };
+        if (next.nodeId !== identity.nodeId || next.generation !== identity.generation) {
+          identity = next;
+          activity.setIdentity?.(identity);
+          writeState({});
+          writer.line(
+            `[dsh-seat] OpenRig seat: node ${identity.nodeId} · ${identity.generation ? `generation ${identity.generation}` : "generation not yet recorded"} (${reason})`,
+          );
+        }
+        if (identity.generation) return;
+      }
+    })().finally(() => {
+      identityInFlight = null;
+    });
+    return identityInFlight;
+  };
+
+  /**
+   * Hash the harness as it stands; when it changed, keep a manifest of it and
+   * say so in the pane. Runs at READY and before every turn, so each turn
+   * record names the harness that ran it.
+   */
+  const refreshHarness = () => {
+    let next;
+    try {
+      next = fingerprinter.compute({
+        runner: VERSION,
+        agent: agentInfo?.name ? `${agentInfo.name}@${agentInfo.version ?? "unknown"}` : null,
+        profile: args.profile,
+        posture,
+        mcpServers: mcpServersText === null ? null : sha256(mcpServersText),
+      });
+    } catch (err) {
+      if (args.verbose) writer.line(`[dsh-seat] harness fingerprint failed: ${err.message}`);
+      return;
+    }
+    if (next.fingerprint === harness?.fingerprint) return;
+    const previous = harness;
+    harness = next;
+    try {
+      writeJsonAtomic(seatFile(args, path.join("harness", `${next.fingerprint}.json`)), { ...next, computedAt: now() });
+    } catch {
+      /* the fingerprint stands without its manifest */
+    }
+    writeState({});
+    const short = (h) => h.fingerprint.slice(0, 12);
+    if (!previous) {
+      const files = `${next.files.length} file${next.files.length === 1 ? "" : "s"}${next.truncated ? ", truncated" : ""}`;
+      writer.line(`[dsh-seat] harness ${short(next)} (${files})`);
+      return;
+    }
+    const diff = diffHarness(previous, next);
+    const counts = [["+", diff.added], ["~", diff.changed], ["-", diff.removed]]
+      .filter(([, labels]) => labels.length)
+      .map(([sign, labels]) => `${sign}${labels.length}`);
+    const what = [counts.length ? `${counts.join(" ")} files` : "", diff.settings.length ? `settings: ${diff.settings.join(", ")}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    writer.line(`[dsh-seat] harness changed ${short(previous)} → ${short(next)} (${what})`);
+  };
 
   writeState({ ready: false, exited: null });
 
@@ -296,39 +469,135 @@ export async function runSeat(options) {
   if (!args.activity) writer.line("[dsh-seat] activity reporting disabled by flag");
   else if (!activity.enabled) writer.line("[dsh-seat] activity reporting off (no OpenRig activity endpoint found)");
 
+  writer.line(
+    telemetryChosen(env)
+      ? "[dsh-seat] dsh telemetry: operator setting kept"
+      : "[dsh-seat] dsh telemetry off (DSH_TELEMETRY_DISABLED=1)",
+  );
+  if (!sessionLogUploadDisabled({ dshHome: args.dshHome, profile: args.profile })) {
+    writer.line(
+      "[dsh-seat] note: this seat home leaves dsh's session-log upload on — official-API requests also carry the session log. scripts/make-seat-home.sh writes the patch that turns it off.",
+    );
+  }
+
   const client = clientFactory({
     command: args.dshCommand,
     args: ["--profile", args.profile],
     cwd: args.cwd,
-    env: { ...env, DSH_HOME: args.dshHome, DSH_PERMISSION_MODE: permissionMode },
+    env: dshChildEnv(env, { dshHome: args.dshHome, permissionMode }),
     requestTimeoutMs: args.requestTimeoutMs,
   });
 
+  // ── turn records ──────────────────────────────────────────────────────────
+
+  const launchTotals = { turns: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 };
+  let usageGapNoted = false;
+
+  /**
+   * Append one turn's record to turns.jsonl: what ran it (harness, model, seat
+   * identity), how it ended, and the tokens it used per the dsh session log.
+   * Never throws; waits at most TAKE_WAITS_MS for the log to catch up.
+   */
+  async function recordTurn(turn) {
+    const endedAt = now();
+    const durationMs = Date.now() - turn.startedMs;
+    let taken = { rows: [], settled: false, error: "no session log reader" };
+    // A dead or departing agent writes no more; anything else gets the full
+    // wait, a failed prompt included — its turn may still be ending.
+    const waits = shuttingDown || agentGone ? [0] : TAKE_WAITS_MS;
+    try {
+      if (logTail) taken = await logTail.takeTurn({ waits });
+    } catch (err) {
+      taken = { rows: [], settled: false, error: err.message };
+    }
+    const fields = turnUsageFields(taken);
+    try {
+      appendJsonl(turnsFile, {
+        schema: TURN_RECORD_SCHEMA,
+        sessionName: args.sessionName,
+        launchId: args.launchId,
+        sessionId,
+        turn: turn.number,
+        startedAt: turn.startedAt,
+        endedAt,
+        durationMs,
+        stopReason: turn.stopReason,
+        error: turn.error,
+        nodeId: identity.nodeId,
+        generation: identity.generation,
+        harnessFingerprint: turn.harness,
+        posture,
+        model: args.model,
+        effort: args.effort,
+        promptBytes: Buffer.byteLength(turn.text),
+        promptSha256: sha256(turn.text),
+        context: lastContext,
+        ...fields,
+      });
+    } catch (err) {
+      writer.line(`[dsh-seat] could not write the turn record: ${err.message}`);
+    }
+    if (!fields.usage) {
+      if (!usageGapNoted) writer.line(`[usage] unavailable: ${fields.usageNote}`);
+      usageGapNoted = true;
+      return;
+    }
+    launchTotals.turns += 1;
+    for (const key of ["inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens"]) launchTotals[key] += fields.usage[key];
+    writer.line(`[usage] ${describeUsage(fields)}`);
+  }
+
   const queue = [];
   let inFlight = false;
+  let turnDone = null; // the current turn, through its record
+  let turnNumber = 0;
 
   const pump = () => {
-    if (inFlight || shuttingDown || queue.length === 0) return;
+    // The next prompt waits for the last turn's record, so the session-log
+    // rows of one turn are never read as another's.
+    if (turnDone || shuttingDown || agentGone || queue.length === 0) return;
     const text = queue.shift();
     inFlight = true;
+    refreshHarness();
+    const turn = {
+      number: ++turnNumber,
+      text,
+      startedAt: now(),
+      startedMs: Date.now(),
+      harness: harness?.fingerprint ?? null,
+      stopReason: null,
+      error: null,
+    };
+    // Still no generation? Ask again now and then, so a seat adopted without a
+    // claim hint reaching it still becomes trusted.
+    if (!identity.generation && Date.now() - identityAskedAt > 60_000) void refreshIdentity("turn");
     activity.turnStart();
-    client
+    turnDone = client
       .prompt({ sessionId, text })
       .then((result) => {
-        const stop = result?.stopReason ?? "unknown";
-        writer.line(`── turn end (${stop}) ──`);
+        turn.stopReason = result?.stopReason ?? "unknown";
+        writer.line(`── turn end (${turn.stopReason}) ──`);
       })
       .catch((err) => {
+        turn.error = err.message;
         if (!shuttingDown) writer.line(`${RUNNER_ERROR_MARKER} prompt failed: ${err.message}`);
       })
-      .finally(() => {
+      .then(() => {
         inFlight = false;
         activity.turnEnd();
+        return recordTurn(turn);
+      })
+      .finally(() => {
+        turnDone = null;
         pump();
       });
   };
 
   const enqueue = (text) => {
+    if (agentGone) {
+      writer.line("[dsh-seat] the agent has exited; this prompt was not sent");
+      return;
+    }
     queue.push(text);
     if (inFlight || queue.length > 1) writer.line(`[queued: ${queue.length}${inFlight ? " · 1 running" : ""}]`);
     pump();
@@ -343,9 +612,14 @@ export async function runSeat(options) {
       case "session":
         writer.line(`[dsh-seat] session ${sessionId ?? "(none)"} · cwd ${args.cwd}`);
         return true;
-      case "usage":
-        writer.line(lastUsagePercent === null ? "[dsh-seat] no usage reported yet" : `[dsh-seat] context ${lastUsagePercent}% used`);
+      case "usage": {
+        const context = lastUsagePercent === null ? "context: not reported yet" : `context ${lastUsagePercent}% used`;
+        const spent = launchTotals.turns
+          ? ` · this launch: ${launchTotals.turns} turn${launchTotals.turns === 1 ? "" : "s"}, in ${count(launchTotals.inputTokens)}, cache read ${count(launchTotals.cacheReadTokens)}, out ${count(launchTotals.outputTokens)}`
+          : "";
+        writer.line(`[dsh-seat] ${context}${spent} · records ${turnsFile}`);
         return true;
+      }
       case "cancel":
         if (sessionId) {
           client.cancel({ sessionId });
@@ -399,6 +673,7 @@ export async function runSeat(options) {
       case "usage_update": {
         if (typeof update.used === "number" && typeof update.size === "number" && update.size > 0) {
           const percent = Math.floor((update.used / update.size) * 100);
+          lastContext = { used: update.used, size: update.size };
           if (percent !== lastUsagePercent) {
             lastUsagePercent = percent;
             writer.line(`[context] ${percent}% (${update.used}/${update.size})`);
@@ -431,6 +706,11 @@ export async function runSeat(options) {
 
   const exited = new Promise((resolve) => {
     client.on("exit", ({ code, signal }) => {
+      agentGone = true;
+      if (queue.length) {
+        writer.line(`[dsh-seat] ${queue.length} queued prompt${queue.length === 1 ? "" : "s"} dropped: the agent has exited`);
+        queue.length = 0;
+      }
       // A child that exits because WE are shutting it down is not an agent
       // failure: keep the real reason (user-quit / signal-* / stdin-closed) so
       // the sidecar records why the seat ended rather than an incidental exit.
@@ -459,14 +739,20 @@ export async function runSeat(options) {
     await client.dispose();
   }
 
+  // runSeat waits for this before returning, or the CLI's exit could beat the
+  // marker and the sidecar write and leave a dead seat recorded as ready.
+  let signalled = null;
   const onSignal = (signal) => {
+    if (signalled) return;
     exitAnnounced = true;
-    void shutdown(`signal-${signal}`).then(() => {
-      writer.line(`${RUNNER_EXIT_MARKER} (${signal})`);
-      writeState({ ready: false, exited: { reason: `signal-${signal}` } });
-      process.exitCode = 0;
-      resolveDone();
-    });
+    signalled = shutdown(`signal-${signal}`)
+      .then(() => (turnDone ? Promise.race([turnDone, sleep(5000)]) : null))
+      .then(() => {
+        writer.line(`${RUNNER_EXIT_MARKER} (${signal})`);
+        writeState({ ready: false, exited: { reason: `signal-${signal}` } });
+        process.exitCode = 0;
+        resolveDone();
+      });
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
@@ -480,7 +766,8 @@ export async function runSeat(options) {
 
   try {
     client.start?.();
-    await client.initialize({ clientInfo: { name: "dsh-seat", version: VERSION } });
+    const initialized = await client.initialize({ clientInfo: { name: "dsh-seat", version: VERSION } });
+    agentInfo = initialized?.agentInfo ?? null;
 
     if (args.session) {
       try {
@@ -502,11 +789,20 @@ export async function runSeat(options) {
     if (args.model) await client.setConfigOption({ sessionId, configId: "model", value: args.model });
     if (args.effort) await client.setConfigOption({ sessionId, configId: "reasoning_effort", value: args.effort });
 
+    // Turn usage is read from the session log; what it held before this
+    // launch (a resumed session's history) is not this launch's work.
+    logTail = new SessionLogTail({ sessionsRoot: args.sessionsRoot, sessionId });
+    const logGap = logTail.skipExisting();
+    refreshHarness();
+    writer.line(`[dsh-seat] turn records → ${turnsFile}${logGap ? ` · usage: ${logGap}` : ""}`);
+
     ready = true;
     writeState({ ready: true, exited: null });
     activity.sessionIdentity({ sessionId });
     writer.line(RUNNER_READY_MARKER);
     writer.line("[dsh-seat] type a line + Enter to prompt · /help for local commands");
+    // A runner restarted after adoption is already bound; a new pane is not yet.
+    void refreshIdentity("ready");
   } catch (err) {
     writer.line(`${RUNNER_ERROR_MARKER} setup failed: ${err.message}`);
     writeState({ ready: false, exited: { reason: "setup-failed", error: err.message } });
@@ -516,21 +812,41 @@ export async function runSeat(options) {
     return { code: 1, sessionId };
   }
 
-  const rl = readline.createInterface({ input, crlfDelay: Infinity, terminal: false });
-  rl.on("line", (rawLine) => {
-    const line = rawLine.replace(/\r$/, "");
-    if (shuttingDown) return;
-    if (!line.trim()) return;
-    if (line.startsWith("/") && localCommand(line.trim())) return;
-    enqueue(line);
-  });
-  // A seat whose pane input is gone has no way to receive work: end honestly
-  // rather than sit frozen holding a session open.
-  rl.on("close", () => {
-    if (!shuttingDown) void shutdown("stdin-closed").then(resolveDone);
+  const paneInput = attachPaneInput({
+    input,
+    output,
+    echo: (text) => writer.input(text),
+    onSubmit: (text, { pasted = false } = {}) => {
+      if (shuttingDown) return;
+      // Only a typed line can be a local command; anything pasted — every
+      // `rig send` — goes to the agent, even when it starts with "/".
+      if (!pasted && text.startsWith("/") && !text.includes("\n") && localCommand(text.trim())) return;
+      // Adoption has just bound this pane: learn the node and generation it got.
+      if (CLAIM_HINT.test(text)) void refreshIdentity("adopted", [500, 1500, 4000]);
+      enqueue(text);
+    },
+    onInterrupt: () => {
+      if (inFlight && sessionId) {
+        client.cancel({ sessionId });
+        writer.line("[dsh-seat] cancel requested (Ctrl-C)");
+      } else {
+        writer.line("[dsh-seat] Ctrl-C: no turn is running · /quit closes the seat");
+      }
+    },
+    onReject: (maxBytes) => {
+      writer.line(`[dsh-seat] input rejected: larger than ${maxBytes} bytes — send a smaller message`);
+    },
+    // A seat whose pane input is gone has no way to receive work: end honestly
+    // rather than sit frozen holding a session open.
+    onClose: () => {
+      if (!shuttingDown) void shutdown("stdin-closed").then(resolveDone);
+    },
   });
 
   await Promise.race([exited, done]);
+  // A turn cut short by the exit still gets its record.
+  if (turnDone) await Promise.race([turnDone, sleep(5000)]);
+  if (signalled) await signalled;
 
   if (!exitAnnounced && exitReason) {
     const marker = exitReason.startsWith("agent-exit") && exitCode !== 0 ? RUNNER_ERROR_MARKER : RUNNER_EXIT_MARKER;
@@ -540,7 +856,7 @@ export async function runSeat(options) {
 
   process.off("SIGINT", onSignal);
   process.off("SIGTERM", onSignal);
-  rl.close();
+  paneInput.detach();
   return { code: exitCode, sessionId };
 }
 

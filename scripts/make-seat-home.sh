@@ -9,6 +9,10 @@
 # node_modules are symlinked (no copies), credentials are symlinked (not copied),
 # and only the profile directory is a real writable copy.
 #
+# It also writes the seat's own home-level cordis.patch.yml (which outranks the
+# profile layer): dsh's session-log upload to DeepSeek is turned off, and a fresh
+# sessions root stores plain JSONL so dsh-seat can read per-turn token usage.
+#
 # Usage: ./scripts/make-seat-home.sh [target-dir] [source-home]
 #   target-dir    default: <repo>/.seat-home
 #   source-home   default: $DSH_HOME, else ~/.dsh
@@ -57,6 +61,38 @@ for extra in settings.yaml.imported .agent-presets; do
     echo "copied          $extra"
   fi
 done
+
+# Seat defaults. dsh composes $DSH_HOME/cordis.patch.yml over the profile's own
+# patch, and a patch replaces a row's whole config, so every field a row needs is
+# written out. An existing file is the operator's: leave it alone.
+PATCH="$TARGET/cordis.patch.yml"
+if [ -e "$PATCH" ]; then
+  echo "seat patch already present: $PATCH (left as is)"
+else
+  SESSIONS="$(cd "$TARGET" && pwd)/sessions"
+  SESSIONS_YAML="$(printf '%s' "$SESSIONS" | sed "s/'/''/g")"
+  {
+    echo "# dsh-seat seat defaults, written by scripts/make-seat-home.sh. Safe to edit."
+    echo "# A patch replaces a row's whole config, so keep every field the row needs."
+    echo ""
+    echo "# Do not attach this seat's session log to DeepSeek API requests"
+    echo "# (dsh-session-log-deepseek; on by default)."
+    echo "- id: session-log-deepseek"
+    echo "  config:"
+    echo "    enabled: false"
+    if [ ! -e "$TARGET/sessions" ]; then
+      echo ""
+      echo "# Plain JSONL session logs, so dsh-seat can read per-turn token usage"
+      echo "# without zstd. Set only on a fresh sessions root."
+      echo "- id: session-persistence-jsonl"
+      echo "  config:"
+      # printf, not echo: dash's echo would turn a backslash in the path into an escape.
+      printf "    root: '%s'\n" "$SESSIONS_YAML"
+      echo "    compression: none"
+    fi
+  } > "$PATCH"
+  echo "wrote           $PATCH (session-log upload off)"
+fi
 
 cat <<EOF
 
