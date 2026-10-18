@@ -8,11 +8,12 @@
 # this pane, and `rig adopt --bind <member>=<session>` binds it to the member.
 #
 # DSH_HOME: dsh rewrites $DSH_HOME/profiles/<name>/cordis.yml on EVERY boot, so a
-# seat needs a home it can write to and that nothing else is using. Pointing a
-# seat at your own ~/.dsh rewrites the same profile files your own dsh sessions
-# are using. This script therefore assembles a dedicated seat home for you under
-# $OPENRIG_HOME/state/dsh/seat-home, and only uses something else if you pass it
-# explicitly.
+# seat needs a home it can write to and that nothing else is using — not your own
+# ~/.dsh, and not another seat's: dsh's storages/ has no cross-process locking,
+# and a per-seat home is what lets each seat carry its own harness. This script
+# therefore assembles a dedicated home per seat, beside its runner state, at
+# $OPENRIG_HOME/state/dsh/<member>@<rig>/home, and only uses something else if
+# you pass it explicitly.
 
 set -eu
 
@@ -26,11 +27,16 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 RUNNER="$ROOT/src/dsh-seat.mjs"
 STATE_ROOT="${OPENRIG_HOME:-$HOME/.openrig}/state/dsh"
 
+SESSION="${MEMBER}@${RIG}"
+# The same single path segment the runner uses for <stateRoot>/<session>/
+# (src/state.mjs sanitizeSessionName), so home and sidecar sit side by side.
+SEAT_DIR="$(printf '%s' "$SESSION" | sed 's/[^A-Za-z0-9._@-][^A-Za-z0-9._@-]*/_/g')"
+
 if [ "$#" -ge 4 ] && [ -n "${4:-}" ]; then
   DSH_HOME_ARG="$4"
   SOURCE_HOME=""
 else
-  DSH_HOME_ARG="$STATE_ROOT/seat-home"
+  DSH_HOME_ARG="$STATE_ROOT/$SEAT_DIR/home"
   SOURCE_HOME="${DSH_HOME:-$HOME/.dsh}"
 fi
 
@@ -58,8 +64,6 @@ fi
 if ! command -v dsh >/dev/null 2>&1; then
   echo "warning: 'dsh' is not on this shell's PATH; the seat will fail to start unless the pane's shell finds it." >&2
 fi
-
-SESSION="${MEMBER}@${RIG}"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "tmux session '$SESSION' already exists — attach with: tmux attach -t $SESSION" >&2

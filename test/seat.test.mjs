@@ -15,7 +15,7 @@ function workspace() {
 }
 
 /** Start a seat against the fake agent and return handles. */
-function startSeat({ argv = [], agentEnv = {}, posture = "floor" } = {}) {
+function startSeat({ argv = [], agentEnv = {}, posture = "floor", env = {}, onClientOptions = () => {} } = {}) {
   const { dir, stateRoot, home } = workspace();
   const args = parseArgs(
     [
@@ -42,8 +42,11 @@ function startSeat({ argv = [], agentEnv = {}, posture = "floor" } = {}) {
     output,
     errorOutput: output,
     // Keep the runner away from the real ~/.openrig activity endpoint.
-    env: { OPENRIG_HOME: path.join(dir, "openrig-home") },
-    clientFactory: fakeAgentFactory(agentEnv),
+    env: { OPENRIG_HOME: path.join(dir, "openrig-home"), ...env },
+    clientFactory: (opts) => {
+      onClientOptions(opts);
+      return fakeAgentFactory(agentEnv)(opts);
+    },
     activityFactory: () => activity,
   });
   return { args, input, output, activity, done, dir, stateRoot, home };
@@ -222,6 +225,42 @@ test("Ctrl-C cancels the turn in flight, and is harmless when idle", async () =>
   seat.input.write("\x03");
   await waitFor(() => seat.output.text().includes("── turn end (cancelled) ──"), { label: "cancelled turn" });
   assert.match(seat.output.text(), /cancel requested \(Ctrl-C\)/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("the dsh child runs with telemetry off, and the pane flags a home that still uploads session logs", async () => {
+  let childEnv = null;
+  const seat = startSeat({ onClientOptions: (opts) => (childEnv = opts.env) });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  assert.equal(childEnv.DSH_TELEMETRY_DISABLED, "1");
+  assert.equal(childEnv.DSH_HOME, seat.home);
+  assert.equal(childEnv.DSH_PERMISSION_MODE, "workspace-write");
+  assert.match(seat.output.text(), /dsh telemetry off \(DSH_TELEMETRY_DISABLED=1\)/);
+  assert.match(seat.output.text(), /leaves dsh's session-log upload on/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("an operator's telemetry choice is kept, and a patched home gets no upload note", async () => {
+  let childEnv = null;
+  const { home } = workspace();
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "cordis.patch.yml"), "- id: session-log-deepseek\n  config:\n    enabled: false\n");
+  const seat = startSeat({
+    argv: ["--dsh-home", home],
+    env: { DSH_TELEMETRY_MODE: "FEEDBACK_ONLY" },
+    onClientOptions: (opts) => (childEnv = opts.env),
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  assert.equal(childEnv.DSH_TELEMETRY_DISABLED, undefined);
+  assert.equal(childEnv.DSH_TELEMETRY_MODE, "FEEDBACK_ONLY");
+  assert.match(seat.output.text(), /dsh telemetry: operator setting kept/);
+  assert.doesNotMatch(seat.output.text(), /session-log upload on/);
 
   seat.input.write("/quit\n");
   await seat.done;

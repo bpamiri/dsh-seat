@@ -37,6 +37,7 @@ import {
   describeDecision,
 } from "./permissions.mjs";
 import { ActivityPoster, readActivityEndpoint, defaultOpenRigHome } from "./activity.mjs";
+import { dshChildEnv, telemetryChosen, sessionLogUploadDisabled } from "./privacy.mjs";
 import { sidecarPath, writeSidecar } from "./state.mjs";
 
 export const RUNNER_READY_MARKER = "[dsh-runner] READY";
@@ -304,11 +305,22 @@ export async function runSeat(options) {
   if (!args.activity) writer.line("[dsh-seat] activity reporting disabled by flag");
   else if (!activity.enabled) writer.line("[dsh-seat] activity reporting off (no OpenRig activity endpoint found)");
 
+  writer.line(
+    telemetryChosen(env)
+      ? "[dsh-seat] dsh telemetry: operator setting kept"
+      : "[dsh-seat] dsh telemetry off (DSH_TELEMETRY_DISABLED=1)",
+  );
+  if (!sessionLogUploadDisabled({ dshHome: args.dshHome, profile: args.profile })) {
+    writer.line(
+      "[dsh-seat] note: this seat home leaves dsh's session-log upload on — official-API requests also carry the session log. scripts/make-seat-home.sh writes the patch that turns it off.",
+    );
+  }
+
   const client = clientFactory({
     command: args.dshCommand,
     args: ["--profile", args.profile],
     cwd: args.cwd,
-    env: { ...env, DSH_HOME: args.dshHome, DSH_PERMISSION_MODE: permissionMode },
+    env: dshChildEnv(env, { dshHome: args.dshHome, permissionMode }),
     requestTimeoutMs: args.requestTimeoutMs,
   });
 
