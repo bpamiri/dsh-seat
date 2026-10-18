@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 
 import {
   SessionLogTail,
-  closedTurnCut,
+  turnsSettled,
   findSessionLog,
   sessionDirName,
   summarizeTurnRows,
@@ -108,13 +108,14 @@ test("zstd frames are split by their headers; a frame still being written is lef
   assert.throws(() => zstdFrames(Buffer.from("plain text, not zstd")), /no zstd frame/);
 });
 
-test("the cut falls after the last closed turn, leaving a turn already under way", () => {
+test("rows settle only once a turn has started and every turn they start has ended", () => {
   const first = turnRows(1);
-  const next = [row("turn/start", { turn: 2 }), row("step/start", { turn: 2, step: 1 })];
-  assert.equal(closedTurnCut([...first, ...next]), first.length);
-  assert.equal(closedTurnCut(next), 0);
-  // A closing row whose start was handed out earlier still closes.
-  assert.equal(closedTurnCut([row("step/end", { turn: 3, step: 1 }), row("turn/end", { turn: 3, reason: { kind: "completed" } })]), 2);
+  const lateEnd = row("turn/end", { turn: 0, reason: { kind: "completed" } });
+  assert.equal(turnsSettled(first), true);
+  assert.equal(turnsSettled([lateEnd, ...first]), true);
+  assert.equal(turnsSettled([...first, row("turn/start", { turn: 2 })]), false, "a turn still under way");
+  assert.equal(turnsSettled([lateEnd, row("step/end", { turn: 0, step: 1 })]), false, "an earlier turn's late end is not a turn");
+  assert.equal(turnsSettled([]), false);
 });
 
 test("a plain log: history is skipped, each turn's rows are handed out once, a half-written line waits", async () => {
@@ -126,19 +127,20 @@ test("a plain log: history is skipped, each turn's rows are handed out once, a h
   assert.equal(tail.skipExisting(), null);
 
   const second = turnRows(2);
-  const nextStart = row("turn/start", { turn: 3 });
-  const partial = JSON.stringify(row("step/start", { turn: 3, step: 1 }));
-  fs.appendFileSync(file, lines([...second, nextStart]) + partial.slice(0, 10));
+  const third = turnRows(3);
+  const partial = JSON.stringify(third[0]);
+  fs.appendFileSync(file, lines(second) + partial.slice(0, 10));
 
   const taken = await tail.takeTurn({ waits: [0] });
   assert.equal(taken.settled, true);
   assert.deepEqual(taken.rows, second);
+  assert.deepEqual(taken.lateTurns, []);
   assert.equal(taken.logPath, file);
 
-  fs.appendFileSync(file, `${partial.slice(10)}\n${lines(turnRows(3).slice(2))}`);
-  const third = await tail.takeTurn({ waits: [0] });
-  assert.equal(third.settled, true);
-  assert.deepEqual(third.rows.map((r) => r.type), ["turn/start", "step/start", ...turnRows(3).slice(2).map((r) => r.type)]);
+  fs.appendFileSync(file, `${partial.slice(10)}\n${lines(third.slice(1))}`);
+  const next = await tail.takeTurn({ waits: [0] });
+  assert.equal(next.settled, true);
+  assert.deepEqual(next.rows, third);
 });
 
 test("a history longer than the tail window is skipped from its end", async () => {
@@ -199,6 +201,39 @@ test("a turn whose closing rows never come is handed out unsettled; a missing lo
   assert.ok(Date.now() - started < 500, "no waiting for a log that does not exist");
   assert.deepEqual(missing.rows, []);
   assert.match(missing.error, /no session log/);
+});
+
+test("a turn whose end lands after its record does not shift the records that follow", async () => {
+  const root = sessionsRoot();
+  const file = logFile(root, "s7");
+  fs.writeFileSync(file, lines([header("s7")]));
+  const tail = new SessionLogTail({ sessionsRoot: root, sessionId: "s7" });
+  tail.skipExisting();
+
+  // Turn 1 ends after its record gave up waiting.
+  const one = turnRows(1);
+  fs.appendFileSync(file, lines(one.slice(0, -1)));
+  const first = turnUsageFields(await tail.takeTurn({ waits: [0] }));
+  assert.equal(first.usageSource, "session-log-partial");
+
+  // Turn 1's end arrives with turn 2's opening rows; turn 2 ends a moment later.
+  const two = turnRows(2, { usage: { inputTokens: 222, outputTokens: 22 } });
+  fs.appendFileSync(file, lines([one.at(-1), ...two.slice(0, -1)]));
+  const waiting = tail.takeTurn({ waits: [0, 50, 50, 50] });
+  setTimeout(() => fs.appendFileSync(file, lines(two.slice(-1))), 60);
+  const second = turnUsageFields(await waiting);
+  assert.deepEqual(second.dshTurns, [1, 2]);
+  assert.equal(second.usage.inputTokens, 222, "turn 2's own tokens, none of turn 1's");
+  assert.equal(second.usageSource, "session-log-partial", "a record carrying another turn's late rows is not fully trusted");
+  assert.match(second.usageNote, /late rows of dsh turn 1/);
+
+  // And the record after that is whole again.
+  const three = turnRows(3, { usage: { inputTokens: 333, outputTokens: 33 } });
+  fs.appendFileSync(file, lines(three));
+  const third = turnUsageFields(await tail.takeTurn({ waits: [0] }));
+  assert.deepEqual(third.dshTurns, [3]);
+  assert.equal(third.usage.inputTokens, 333);
+  assert.equal(third.usageSource, "session-log");
 });
 
 test("a zstd log on a Node without a zstd decoder says so instead of waiting", async () => {
@@ -271,12 +306,12 @@ test("turn fields say how far to trust the numbers", () => {
 
   const unsettled = turnUsageFields({ rows: turnRows(2).slice(0, -1), settled: false, error: null });
   assert.equal(unsettled.usageSource, "session-log-partial");
-  assert.match(unsettled.usageNote, /had not closed/);
+  assert.match(unsettled.usageNote, /had not ended .* counts toward the next record/);
 
   const noUsage = turnUsageFields({ rows: turnRows(3, { usage: null }), settled: true, error: null });
   assert.equal(noUsage.usageSource, "session-log-partial");
   assert.match(noUsage.usageNote, /1 model call\(s\) reported no usage/);
 
   const none = turnUsageFields({ rows: [], settled: false, error: "no session log for x under /y" });
-  assert.deepEqual(none, { usageSource: "unavailable", usageNote: "no session log for x under /y", usage: null });
+  assert.deepEqual(none, { usageSource: "unavailable", usageNote: "no session log for x under /y", usage: null, lateDshTurns: [] });
 });

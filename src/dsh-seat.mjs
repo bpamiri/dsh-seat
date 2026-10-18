@@ -496,9 +496,9 @@ export async function runSeat(options) {
     const endedAt = now();
     const durationMs = Date.now() - turn.startedMs;
     let taken = { rows: [], settled: false, error: "no session log reader" };
-    // A dead agent writes no more; a failed prompt may have logged nothing, so
-    // it gets one batch window, not the full wait.
-    const waits = shuttingDown || agentGone ? [0] : turn.error ? [0, 250] : TAKE_WAITS_MS;
+    // A dead or departing agent writes no more; anything else gets the full
+    // wait, a failed prompt included — its turn may still be ending.
+    const waits = shuttingDown || agentGone ? [0] : TAKE_WAITS_MS;
     try {
       if (logTail) taken = await logTail.takeTurn({ waits });
     } catch (err) {

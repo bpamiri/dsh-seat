@@ -234,7 +234,8 @@ Two gaps that only a live adoption exposes, both Phase 2 work:
   movement are ignored. Pastes and `rig send` are unaffected.
 - **Turn usage covers the session's own model calls.** Subagents write child sessions of their own,
   which are not read yet. A turn whose closing log rows arrive after the runner's ~2 s wait is recorded
-  as `session-log-partial`, and its late rows count toward the next record.
+  as `session-log-partial`; its late rows count toward the next record, which names them in
+  `lateDshTurns` and is marked partial too, so totals across records stay whole.
 - **`turns.jsonl` is never rotated.** It grows by one line per turn; archive it like any log.
 - **No identity primitive in dsh.** The pane name is the seat identity; dsh itself has no `--name`.
 
@@ -274,13 +275,14 @@ After every turn the runner appends one JSON line to `<state-root>/<member>@<rig
 | `byModel` | the same, per `provider/model` route |
 | `llmCalls`, `steps`, `tools`, `endReasons`, `dshTurns`, `contextWindow`, `context` | model calls, steps, tool calls with failures by tool, how dsh's turns ended and their numbers, the context window and how full it was |
 | `usageSource`, `usageNote` | `session-log`; `session-log-partial`, with the reason; or `unavailable` (`usage` is null) |
+| `lateDshTurns` | dsh turns whose late rows this record carries because an earlier record was taken before they ended |
 
 ACP reports no token usage — only how full the context window is — so the numbers come from dsh's own
 session log, where every model call is recorded with the provider's counts. The runner finds the log
 under `<dsh-home>/sessions` (`--sessions-root` overrides), skips what it held before this launch, and
 after each turn reads the rows that turn appended. dsh writes its log in batches up to 200 ms behind
-the events, so the runner waits briefly (at most about 2 s) for the turn to close, and sends the next
-queued prompt only after the record is written. The pane shows one line per turn
+the events, so the runner waits briefly (at most about 2 s) until a whole turn is in the log, and sends
+the next queued prompt only after the record is written. The pane shows one line per turn
 (`[usage] 3 model calls · in 1,204 · cache read 41,600 · out 512 · 2 tool calls · deepseek/…`) and
 `/usage` shows this launch's totals.
 

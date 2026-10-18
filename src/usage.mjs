@@ -32,9 +32,9 @@
 // dsh writes the log in batches, holding events up to 200ms
 // (LIVE_WRITE_BATCH_MAX_DELAY_MS, session-persistence-jsonl/src/storage.ts), and
 // answers the ACP prompt without waiting for the last batch, so a turn's closing
-// rows can land just after the answer. The tail waits briefly for the turn to
-// close, then cuts at a closed turn so a turn already under way stays for the
-// next record.
+// rows can land just after the answer. The tail waits briefly until a turn has
+// started and every turn it has seen has closed. A turn that ends later still is
+// handed out unfinished; its late rows go with the next record, which says so.
 //
 // Counted: the session's own model calls. Subagents log to child sessions of
 // their own and are not counted here.
@@ -162,20 +162,21 @@ function readRange(file, start, end) {
   }
 }
 
-/** Index just past the last row at which every turn seen has closed; 0 when none has. */
-export function closedTurnCut(rows) {
+/**
+ * Whether rows hold a whole turn: one has started, and every turn they start
+ * has ended. The end of an earlier turn alone does not count — that is the late
+ * tail of a turn already handed out, not the turn being waited for.
+ */
+export function turnsSettled(rows) {
   const open = new Set();
-  let closed = false;
-  let cut = 0;
-  rows.forEach((row, index) => {
-    if (row?.type === "turn/start") open.add(row.data?.turn);
-    else if (row?.type === "turn/end") {
-      open.delete(row.data?.turn);
-      closed = true;
-    }
-    if (closed && open.size === 0) cut = index + 1;
-  });
-  return cut;
+  let started = false;
+  for (const row of rows) {
+    if (row?.type === "turn/start") {
+      open.add(row.data?.turn);
+      started = true;
+    } else if (row?.type === "turn/end") open.delete(row.data?.turn);
+  }
+  return started && open.size === 0;
 }
 
 /** Follows one session's log and hands out the rows each turn appended. */
@@ -187,6 +188,7 @@ export class SessionLogTail {
   #offset = 0; // bytes of the log already turned into rows
   #carry = ""; // decoded text after the last complete line
   #rows = []; // rows read and not yet handed out
+  #unfinished = new Set(); // dsh turns handed out before they ended
   #everFound = false;
 
   constructor({ sessionsRoot, sessionId, decompress = zlib.zstdDecompressSync }) {
@@ -210,21 +212,33 @@ export class SessionLogTail {
   }
 
   /**
-   * The rows of the turn that just ended, waiting between reads (`waits`, ms)
-   * until a turn has closed. Never throws.
-   * @returns {Promise<{rows: object[], settled: boolean, error: string|null, logPath: string|null}>}
+   * Everything the log gained since the last take, once it holds a whole turn
+   * (see turnsSettled), waiting between reads (`waits`, ms). After the last wait
+   * the rows are handed out as they are, unsettled. Never throws.
+   * @returns {Promise<{rows: object[], settled: boolean, lateTurns: number[], error: string|null,
+   *   logPath: string|null}>} lateTurns: dsh turns an earlier take handed out before they ended
    */
   async takeTurn({ waits = TAKE_WAITS_MS } = {}) {
     let error = null;
+    let settled = false;
     for (const delay of waits) {
       if (delay) await sleep(delay);
       const read = this.#read();
       error = read.error;
-      const cut = closedTurnCut(this.#rows);
-      if (cut > 0) return { rows: this.#rows.splice(0, cut), settled: true, error: null, logPath: this.logPath };
-      if (read.final) break; // waiting will not change the answer
+      settled = turnsSettled(this.#rows);
+      if (settled || read.final) break; // waiting would not change the answer
     }
-    return { rows: this.#rows.splice(0), settled: false, error, logPath: this.logPath };
+    const rows = this.#rows.splice(0);
+    const lateTurns = [];
+    for (const row of rows) {
+      const turn = row?.data?.turn;
+      if (this.#unfinished.has(turn) && !lateTurns.includes(turn)) lateTurns.push(turn);
+    }
+    for (const row of rows) {
+      if (row?.type === "turn/start") this.#unfinished.add(row.data?.turn);
+      else if (row?.type === "turn/end") this.#unfinished.delete(row.data?.turn);
+    }
+    return { rows, settled, lateTurns, error: settled ? null : error, logPath: this.logPath };
   }
 
   /** @returns {{error: string|null, final: boolean}} final: a later read would not do better */
@@ -426,14 +440,22 @@ export function summarizeTurnRows(rows) {
 
 /**
  * The usage half of a turn record, from what the tail handed out. `usageSource`
- * says how far to trust it: "session-log" (the turn closed and every model call
- * reported usage), "session-log-partial", or "unavailable" (`usage` is null).
+ * says how far to trust it: "session-log" (a whole turn, every model call
+ * reporting usage, nothing of another turn's), "session-log-partial" (the note
+ * says why), or "unavailable" (`usage` is null). Late rows of an earlier turn
+ * are counted here rather than lost, so totals across records stay whole.
  */
-export function turnUsageFields({ rows, settled, error }) {
-  if (rows.length === 0 && error) return { usageSource: "unavailable", usageNote: error, usage: null };
+export function turnUsageFields({ rows, settled, error, lateTurns = [] }) {
+  if (rows.length === 0 && error) return { usageSource: "unavailable", usageNote: error, usage: null, lateDshTurns: [] };
   const summary = summarizeTurnRows(rows);
-  let usageNote = null;
-  if (!settled) usageNote = error ?? "the turn had not closed in the session log";
-  else if (summary.llmCallsWithoutUsage) usageNote = `${summary.llmCallsWithoutUsage} model call(s) reported no usage`;
-  return { usageSource: usageNote ? "session-log-partial" : "session-log", usageNote, ...summary };
+  const notes = [];
+  if (!settled) notes.push(error ?? "the turn had not ended in the session log; what it logs later counts toward the next record");
+  if (lateTurns.length) notes.push(`includes the late rows of dsh turn ${lateTurns.join(", ")}, which an earlier record took before it ended`);
+  if (summary.llmCallsWithoutUsage) notes.push(`${summary.llmCallsWithoutUsage} model call(s) reported no usage`);
+  return {
+    usageSource: notes.length ? "session-log-partial" : "session-log",
+    usageNote: notes.length ? notes.join("; ") : null,
+    lateDshTurns: lateTurns,
+    ...summary,
+  };
 }
