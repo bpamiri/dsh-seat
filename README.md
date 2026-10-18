@@ -36,11 +36,14 @@ interactive surface is a browser (`dsh web`), `headless` is one-shot, and `acp` 
 on stdio. So a bare `dsh` in a pane gives OpenRig nothing to type at. This runner is the bridge.
 
 ```
-pane stdin (rig send / human typing) ──▶ ACP session/prompt   (queued, one in flight)
+pane stdin (rig send / human typing) ──▶ ACP session/prompt   (one per Enter, pastes kept whole;
+                                                              queued, one in flight)
 ACP session/update                   ──▶ human-readable pane mirror
 ACP session/request_permission       ──▶ answered from the seat's posture
-turn boundaries                      ──▶ POST /api/activity/hooks
+turn boundaries                      ──▶ POST /api/activity/hooks (stamped with node + generation)
 lifecycle truth                      ──▶ <stateRoot>/<session>/runner-state.json
+each turn's usage (dsh session log)  ──▶ <stateRoot>/<session>/turns.jsonl, with the harness
+                                         fingerprint that ran it
 ```
 
 ## Status: verified live, not just unit-tested
@@ -56,7 +59,12 @@ Against real `dsh 0.2.0-rc.2` (`acp` profile, Node 24.11):
 | Clean `/quit` | ✅ `EXITED (user-quit)`, `ready:false`, reason recorded |
 | **Resume across a process restart** | ✅ `resumed session 51ec1ace-…`, and the agent still recalled its earlier answer |
 | OpenRig activity endpoint auth + routing | ✅ accepted the token, honest `404 session_not_found` for an unadopted name |
-| Unit/integration suite (`npm test`) | ✅ 25/25 |
+| Unit/integration suite (`npm test`) | ✅ 25/25 at the time |
+
+What has changed since that run — multi-line input framing, privacy defaults, seat identity lookup, and
+turn records with a harness fingerprint — is covered by the suite (now 81 tests) and was checked
+against the dsh (`687f282e`) and OpenRig source it relies on, but has **not yet been run against a live
+dsh or daemon**.
 
 ## Requirements
 
@@ -65,6 +73,8 @@ Against real `dsh 0.2.0-rc.2` (`acp` profile, Node 24.11):
 - A **writable `DSH_HOME`**. dsh rewrites `$DSH_HOME/profiles/<name>/cordis.yml` on every boot, so a
   read-only home fails with `EPERM` before the agent starts.
 - Credentials reachable from that home (`$DSH_HOME/.credentials.yaml` or provider env vars).
+- For turn usage from a **zstd-compressed** session log (dsh's default), Node 22.15 or later. Homes
+  built by `make-seat-home.sh` keep plain logs, which any Node reads.
 
 ### Build a seat home
 
@@ -80,9 +90,16 @@ DSH_SEAT_PROFILE=acp ./scripts/make-seat-home.sh
 
 `.seat-home/` is gitignored, so the credential symlink never lands in version control.
 
+The script also writes the seat's own `cordis.patch.yml` (an existing one is left alone): dsh's
+session-log upload to DeepSeek is turned off (see **Privacy defaults**), and a fresh sessions root keeps
+plain JSONL logs so the runner can read per-turn token usage without zstd.
+
 [`examples/adopt/start-seat.sh`](examples/adopt/start-seat.sh) does this for you: with no explicit
-`dsh-home` argument it assembles `$OPENRIG_HOME/state/dsh/seat-home` from `${DSH_HOME:-~/.dsh}` on
-first use, and **refuses** to start if you point it at your live `~/.dsh`.
+`dsh-home` argument it assembles a home **per seat**, beside that seat's runner state, at
+`$OPENRIG_HOME/state/dsh/<member>@<rig>/home`, from `${DSH_HOME:-~/.dsh}` on first use — and
+**refuses** to start if you point it at your live `~/.dsh`. One home per seat matters twice over: dsh's
+storage has no cross-process locking, and a seat's home holds its harness (skills, `AGENTS.md`,
+patches), which is what a seat tunes.
 
 ## Quick start (standalone pane)
 
@@ -105,8 +122,9 @@ Useful flags:
 | `--model <id>` / `--effort <id>` | set the `model` / `reasoning_effort` ACP config options |
 | `--mcp-servers <file>` | JSON file holding the ACP `mcpServers` array for `session/new` |
 | `--runtime-label <l>` | runtime label used in activity posts (default `dsh`) |
-| `--node-id` / `--generation` | OpenRig seat identity for activity posts |
-| `--state-root <dir>` | sidecar root (default `$OPENRIG_HOME/state/dsh`) |
+| `--node-id` / `--generation` | OpenRig seat identity, when you know it; otherwise it is learned after adoption |
+| `--state-root <dir>` | sidecar and turn-record root (default `$OPENRIG_HOME/state/dsh`) |
+| `--sessions-root <dir>` | dsh session-log root, read for turn usage (default `<dsh-home>/sessions`) |
 | `--no-activity` | do not POST activity to the daemon |
 | `--verbose` | print ignored protocol traffic |
 
@@ -121,6 +139,25 @@ only launch-time selector):
 
 A posture with no matching option answers `cancelled` rather than leaving the agent waiting on a human
 who is not there.
+
+### Input: one message per Enter, pastes kept whole
+
+`rig send` pastes the whole enveloped message with tmux's bracketed paste, then presses Enter. The runner
+switches bracketed paste on in its pane and frames input itself: everything between the paste markers is
+one message, line breaks included, and Enter submits it — so a multi-line `rig send` reaches the agent
+as **one** prompt, not one prompt per line. Ctrl-C clears a half-typed line; on an empty line it cancels
+the running turn.
+Only a single typed line can be a local `/command`; a pasted message that starts with `/` goes to the
+agent. A message over 1 MiB is refused whole rather than cut.
+
+### Privacy defaults
+
+dsh ships two upload paths that are on unless a deployment turns them off: `session-log-deepseek`
+attaches the session log to every official DeepSeek API request, and `session-telemetry-otel` releases
+the session to DeepSeek's collector on explicit feedback. The runner starts dsh with
+`DSH_TELEMETRY_DISABLED=1` unless you have set `DSH_TELEMETRY_DISABLED` or `DSH_TELEMETRY_MODE`
+yourself. The session-log upload is config rather than environment, so `make-seat-home.sh` turns it off
+in the seat home's patch, and a seat whose home leaves it on says so in the pane at startup.
 
 ## Using it as an OpenRig seat (adopt)
 
@@ -148,7 +185,8 @@ rig bind <discoveredId> --rig <rigId> --node scratch.dev1-dsh
 
 What you get: the seat appears in `rig ps`, `rig send` / `rig capture` work, it can own queue items,
 tmux transcript capture starts, and OpenRig types its claim hint into the pane — which this runner
-delivers to the agent as its first prompt.
+delivers to the agent as its first prompt, and takes as its cue to learn its node and generation (see
+**Seat identity**).
 
 ### The one lie you have to tell
 
@@ -174,24 +212,30 @@ Two gaps that only a live adoption exposes, both Phase 2 work:
    (`domain/session-fingerprinter.ts:29,143` matches `[omp-runner] READY`).
 2. **Activity hooks land but are not trusted.** The daemon accepted the posts and then warned:
    *"a recent hook exists … but carried NO occupant generation"* — so the seat's state was decided by
-   `window-sampling`, not by the hooks (`decidedBy: "window-sampling"`). Phase 2's adapter must pass
-   `--node-id` and `--generation` so the runner can stamp them and activity becomes the deciding rung.
+   `window-sampling`, not by the hooks (`decidedBy: "window-sampling"`). *Since addressed in the
+   runner:* it now learns its node and generation from the daemon after adoption (see **Seat
+   identity**); an adapter can still pass `--node-id` and `--generation`.
 
 ## Honest limitations of Phase 1
 
 - **No projection or startup delivery.** OpenRig will not write `AGENTS.md` or install skills for this
-  seat; do it by hand (dsh reads `$DSH_HOME/AGENTS.md` then the project chain, and discovers skills in
-  `<project>/.dsh/skills`, `<project>/.agents/skills`, `$DSH_HOME/skills` — hot-watched).
+  seat; do it by hand (dsh reads `$DSH_HOME/AGENTS.md`, `~/.agents/AGENTS.md`, then the project chain,
+  and discovers skills in `<project>/.dsh/skills`, `<project>/.agents/skills`, `$DSH_HOME/skills`,
+  `~/.agents/skills` — hot-watched).
 - **No daemon-side resume.** `rig down` / snapshot / restore treat the seat as adopted/unmanaged;
   OpenRig will not restart it. Resume is manual: restart the runner with `--session <id>` from
   `runner-state.json`.
-- **Activity reporting is best-effort and, today, mostly rejected.** Posts authenticate and route, but
-  the session-identity post only sticks once the node's declared runtime matches; the seat is declared
-  `stub`, so expect `404`/`409` answers. Failures never disturb the seat.
+- **Activity reporting is best-effort.** Turn hooks are trusted once the runner has learned the seat's
+  generation, but the session-identity post only sticks once the node's declared runtime matches; the
+  seat is declared `stub`, so expect `409` for that post. Failures never disturb the seat.
 - **One prompt in flight.** ACP allows one prompt per session, so extra lines are queued (the pane
   shows `[queued: n]`). Mid-turn steering is not available; `/cancel` aborts the turn.
-- **Line-based input.** Input is read line by line, which matches what `tmux send-keys` + Enter
-  produces. Multi-line bracketed paste is Phase 2 work.
+- **Minimal line editing.** Typed input supports backspace and Ctrl-C; arrow keys, history and cursor
+  movement are ignored. Pastes and `rig send` are unaffected.
+- **Turn usage covers the session's own model calls.** Subagents write child sessions of their own,
+  which are not read yet. A turn whose closing log rows arrive after the runner's ~2 s wait is recorded
+  as `session-log-partial`, and its late rows count toward the next record.
+- **`turns.jsonl` is never rotated.** It grows by one line per turn; archive it like any log.
 - **No identity primitive in dsh.** The pane name is the seat identity; dsh itself has no `--name`.
 
 ## Activity reporting (how it wires up)
@@ -202,17 +246,92 @@ shape OpenRig's Pi runner posts: `UserPromptSubmit` on turn start, `Stop` on tur
 `eventFamily: "session_identity"` post at READY carrying the dsh session id. All posts are
 fire-and-forget: a daemon outage never reaches the seat loop.
 
+### Seat identity
+
+The daemon trusts a turn hook only when it carries the occupant generation, and a pane started by hand
+and then adopted cannot know its node or generation at launch. So the runner asks the daemon it already
+posts to: `GET /api/whoami?sessionName=<seat>` for the node, then
+`GET /api/telemetry/v1/nodes/<node>/tenures` for the newest generation. It asks at READY (a restarted
+runner may already be bound), when OpenRig's adoption claim hint arrives (retrying for a few seconds),
+and, while no generation is known, before a turn at most once a minute. Once known, activity posts, the
+sidecar and the turn records carry `nodeId` and `generation`, and the pane prints
+`OpenRig seat: node … · generation …`. `--node-id` / `--generation` on the command line win and turn
+the lookup off.
+
+## Turn records and the harness fingerprint
+
+After every turn the runner appends one JSON line to `<state-root>/<member>@<rig>/turns.jsonl`
+(schema `dsh-seat/turn/v1`):
+
+| Field | Meaning |
+|---|---|
+| `sessionName`, `launchId`, `sessionId`, `turn` | which seat, launch and dsh session; `turn` counts this launch's prompts |
+| `startedAt`, `endedAt`, `durationMs`, `stopReason`, `error` | how the turn went |
+| `nodeId`, `generation` | the OpenRig seat, once known |
+| `harnessFingerprint`, `posture`, `model`, `effort` | what ran it |
+| `promptBytes`, `promptSha256` | the prompt's size and hash — never its text |
+| `usage` | `inputTokens` (uncached), `cacheReadTokens`, `cacheWriteTokens`, `outputTokens`, `reasoningTokens` (part of output), `totalTokens`, `calls` |
+| `byModel` | the same, per `provider/model` route |
+| `llmCalls`, `steps`, `tools`, `endReasons`, `dshTurns`, `contextWindow`, `context` | model calls, steps, tool calls with failures by tool, how dsh's turns ended and their numbers, the context window and how full it was |
+| `usageSource`, `usageNote` | `session-log`; `session-log-partial`, with the reason; or `unavailable` (`usage` is null) |
+
+ACP reports no token usage — only how full the context window is — so the numbers come from dsh's own
+session log, where every model call is recorded with the provider's counts. The runner finds the log
+under `<dsh-home>/sessions` (`--sessions-root` overrides), skips what it held before this launch, and
+after each turn reads the rows that turn appended. dsh writes its log in batches up to 200 ms behind
+the events, so the runner waits briefly (at most about 2 s) for the turn to close, and sends the next
+queued prompt only after the record is written. The pane shows one line per turn
+(`[usage] 3 model calls · in 1,204 · cache read 41,600 · out 512 · 2 tool calls · deepseek/…`) and
+`/usage` shows this launch's totals.
+
+To price a turn, bill `inputTokens` at the cache-miss rate, `cacheReadTokens` at the cache-hit rate
+(and `cacheWriteTokens` where a provider charges for them), and `outputTokens` at the output rate.
+Per-model totals across every seat on the machine:
+
+```bash
+jq -s '[.[] | select(.byModel) | .byModel | to_entries[]] | group_by(.key)
+  | map({model: .[0].key, calls: (map(.value.calls) | add),
+         input: (map(.value.inputTokens) | add), cacheRead: (map(.value.cacheReadTokens) | add),
+         cacheWrite: (map(.value.cacheWriteTokens) | add), output: (map(.value.outputTokens) | add)})' \
+  "${OPENRIG_HOME:-$HOME/.openrig}"/state/dsh/*/turns.jsonl
+```
+
+The **harness fingerprint** is a sha256 over what shapes the agent apart from the model and the prompt:
+the files dsh reads — `$DSH_HOME/AGENTS.md`, `<agents-home>/AGENTS.md`, the `AGENTS.md` / `CLAUDE.md`
+(and `.local.md`) chain from the project root down to the cwd, the four skill roots
+(`<project>/.dsh/skills`, `<project>/.agents/skills`, `$DSH_HOME/skills`, `<agents-home>/skills`) and
+the home and profile `cordis.patch.yml` — plus posture, profile, dsh version and MCP server config.
+Files are named by role rather than path, so seats with the same harness share a fingerprint. Model and
+effort are left out on purpose, so one harness can be compared across models. It is recomputed before
+every turn; a change is printed in the pane (`harness changed 40107c65a5a2 → 098028e9d9d8 (+1 files)`),
+the sidecar carries the current one, and each distinct fingerprint's manifest — file labels, sizes and
+sha256s, never content — is kept at `<state-root>/<seat>/harness/<fingerprint>.json`, so any two can be
+diffed. Secrets (`.env`, credentials) are never read.
+
+Together they are the measurement half of a self-improvement loop: change a seat's harness, then keep
+the change if turns under the new fingerprint use fewer tokens or fail fewer tool calls. Outcome signals
+(queue closures, reviews) live in OpenRig and join on `nodeId`, `generation` and time. Per-harness totals:
+
+```bash
+jq -s 'map(select(.usage)) | group_by(.harnessFingerprint)
+  | map({harness: .[0].harnessFingerprint[0:12], turns: length,
+         input: (map(.usage.inputTokens) | add), cacheRead: (map(.usage.cacheReadTokens) | add),
+         output: (map(.usage.outputTokens) | add), toolErrors: (map(.tools.errors) | add)})' \
+  "${OPENRIG_HOME:-$HOME/.openrig}"/state/dsh/*/turns.jsonl
+```
+
 ## Tests
 
 ```bash
-npm test                                        # 25 tests: no model, no network, no dsh required
+npm test                                        # 81 tests: no model, no network, no dsh required
 ./scripts/make-seat-home.sh                     # once, for the live paths below
 npm run probe                                   # live ACP handshake (initialize/new/close, real dsh)
 PROBE_PROMPT="reply with one word" npm run probe # live model turn — spends a few tokens
 ```
 
 The suite drives the runner against `test/fake-acp-agent.mjs`, a scriptable ACP server (permission
-requests, resume failure, mid-turn death, non-JSON stdout, usage updates). The live path is covered by
+requests, resume failure, mid-turn death, non-JSON stdout, usage updates, held and cancelled turns, and
+a dsh-shaped session log in plain or zstd form, with closing rows that land late). The live path is covered by
 `probes/probe-acp.mjs` (override its home with `PROBE_DSH_HOME`) and by the manual tmux walkthrough
 above.
 
