@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { runSeat, parseArgs, RUNNER_READY_MARKER, RUNNER_ERROR_MARKER } from "../src/dsh-seat.mjs";
-import { sidecarPath, readSidecar } from "../src/state.mjs";
+import { sidecarPath, readSidecar, seatFile } from "../src/state.mjs";
 import { fakeAgentFactory, recordingActivity, captureStream, openInput, waitFor } from "./helpers.mjs";
 
 // Seats a test leaves running (an assertion failed before its /quit) are
@@ -59,8 +60,8 @@ function startSeat({
     input,
     output,
     errorOutput: output,
-    // Keep the runner away from the real ~/.openrig activity endpoint.
-    env: { OPENRIG_HOME: path.join(dir, "openrig-home"), ...env },
+    // Keep the runner away from the real ~/.openrig activity endpoint and ~/.agents skills.
+    env: { OPENRIG_HOME: path.join(dir, "openrig-home"), DSH_AGENTS_HOME: path.join(dir, "agents-home"), ...env },
     clientFactory: (opts) => {
       onClientOptions(opts);
       return fakeAgentFactory(agentEnv)(opts);
@@ -71,6 +72,19 @@ function startSeat({
   const seat = { args, input, output, activity, done, dir, stateRoot, home };
   running.add(seat);
   return seat;
+}
+
+/** The seat's turn records so far. */
+function turnRecords(seat) {
+  try {
+    return fs
+      .readFileSync(seatFile({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }, "turns.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
 }
 
 test("parseArgs applies seat defaults and rejects nonsense", () => {
@@ -340,6 +354,173 @@ test("an identity given on the command line is used as given and never looked up
   const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
   assert.equal(state.nodeId, "node-x");
   assert.equal(state.generation, "gen-x");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("each turn is recorded with its usage from the dsh session log, the seat identity, and the harness that ran it", async () => {
+  const seat = startSeat({
+    argv: ["--node-id", "node-7", "--generation", "gen-7", "--model", "deepseek-v4-flash", "--effort", "high"],
+    agentEnv: { FAKE_ACP_SESSION_LOG: "1", FAKE_ACP_LOG_TOOL_ERROR: "1", FAKE_ACP_USAGE: "1", FAKE_ACP_CHUNKS: "done" },
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  assert.match(seat.output.text(), /\[dsh-seat\] harness [0-9a-f]{12} \(0 files\)/);
+  assert.doesNotMatch(seat.output.text(), /usage: no session log/);
+
+  seat.input.write("first job\n");
+  await waitFor(() => turnRecords(seat).length === 1, { label: "first record" });
+  seat.input.write("second job\n");
+  await waitFor(() => turnRecords(seat).length === 2, { label: "second record" });
+
+  const [first, second] = turnRecords(seat);
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(first.schema, "dsh-seat/turn/v1");
+  assert.equal(first.sessionName, "dev1-dsh@test-rig");
+  assert.equal(first.launchId, seat.args.launchId);
+  assert.equal(first.sessionId, "session-fake-1");
+  assert.equal(first.turn, 1);
+  assert.equal(second.turn, 2);
+  assert.equal(first.stopReason, "end_turn");
+  assert.equal(first.error, null);
+  assert.equal(first.nodeId, "node-7");
+  assert.equal(first.generation, "gen-7");
+  assert.equal(first.posture, "floor");
+  assert.equal(first.model, "deepseek-v4-flash");
+  assert.equal(first.effort, "high");
+  assert.equal(first.promptBytes, Buffer.byteLength("first job"));
+  assert.equal(first.promptSha256, createHash("sha256").update("first job").digest("hex"));
+  assert.equal(JSON.stringify(first).includes("first job"), false, "the prompt itself is not recorded");
+  assert.deepEqual(first.context, { used: 250, size: 1000 });
+  assert.ok(first.durationMs >= 0);
+
+  assert.equal(first.usageSource, "session-log");
+  assert.equal(first.usageNote, null);
+  assert.deepEqual(first.dshTurns, [1]);
+  assert.deepEqual(second.dshTurns, [2]);
+  assert.deepEqual(first.endReasons, ["completed"]);
+  assert.equal(first.llmCalls, 1);
+  assert.deepEqual(first.usage, {
+    calls: 1,
+    inputTokens: 1200,
+    cacheReadTokens: 4000,
+    cacheWriteTokens: 0,
+    outputTokens: 80,
+    reasoningTokens: 20,
+    totalTokens: 5280,
+  });
+  assert.deepEqual(Object.keys(first.byModel), ["deepseek/deepseek-v4-flash"]);
+  assert.equal(first.contextWindow, 1000000);
+  assert.deepEqual(first.tools, { calls: 1, errors: 1, byName: { bash: { calls: 1, errors: 1 } } });
+
+  // The fingerprint in the record is the sidecar's, and its manifest is kept.
+  assert.match(first.harnessFingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(first.harnessFingerprint, state.harnessFingerprint);
+  const manifest = JSON.parse(
+    fs.readFileSync(seatFile({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }, `harness/${first.harnessFingerprint}.json`), "utf8"),
+  );
+  assert.equal(manifest.fingerprint, first.harnessFingerprint);
+  assert.equal(manifest.settings.agent, "fake-acp@0.0.0");
+  assert.equal(manifest.settings.posture, "floor");
+
+  assert.match(
+    seat.output.text(),
+    /\[usage\] 1 model call · in 1,200 · cache read 4,000 · out 80 · 1 tool call \(1 failed\) · deepseek\/deepseek-v4-flash/,
+  );
+  seat.input.write("/usage\n");
+  await waitFor(() => seat.output.text().includes("this launch: 2 turns, in 2,400, cache read 8,000, out 160"), {
+    label: "/usage totals",
+  });
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("rows that land after the answer, in zstd frames, still make a whole record, and the next prompt waits for it", async () => {
+  // Turn 1's closing row lands 400ms after its answer; turn 2's at once. Were
+  // the second prompt sent before turn 1's record, both turns would close
+  // inside turn 1's wait and be counted as one.
+  const seat = startSeat({
+    agentEnv: { FAKE_ACP_SESSION_LOG: "1", FAKE_ACP_LOG_ZSTD: "1", FAKE_ACP_LOG_LATE_END_MS: "400,0", FAKE_ACP_CHUNKS: "ok" },
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  seat.input.write("first\n");
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "first answer" });
+  seat.input.write("second\n");
+  await waitFor(() => turnRecords(seat).length === 2, { label: "two records", timeoutMs: 10_000 });
+
+  const [first, second] = turnRecords(seat);
+  for (const [record, turn] of [[first, 1], [second, 2]]) {
+    assert.equal(record.usageSource, "session-log", JSON.stringify(record));
+    assert.deepEqual(record.dshTurns, [turn]);
+    assert.deepEqual(record.endReasons, ["completed"]);
+    assert.equal(record.usage.inputTokens, 1200);
+  }
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("a resumed session's earlier turns are not counted as this launch's", async () => {
+  const { home } = workspace();
+  const logFile = path.join(home, "sessions", "--fake-project--", "session-old", "session.v4.jsonl");
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const history = [
+    { type: "session", version: 4, id: "session-old", createdAt: 1, cwd: "/work", isSeeded: false, delegationDepth: 0 },
+    { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } },
+    {
+      type: "assistant/message",
+      seq: 2,
+      time: 2,
+      data: { turn: 1, step: 1, message: { source: { provider: "deepseek", model: "deepseek-v4-pro" } }, usage: { inputTokens: 999999, outputTokens: 999999 }, stream: [] },
+    },
+    { type: "turn/end", seq: 3, time: 3, data: { turn: 1, reason: { kind: "completed" } } },
+  ];
+  fs.writeFileSync(logFile, history.map((row) => `${JSON.stringify(row)}\n`).join(""));
+
+  const seat = startSeat({ argv: ["--dsh-home", home, "--session", "session-old"], agentEnv: { FAKE_ACP_SESSION_LOG: "1" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  seat.input.write("carry on\n");
+  await waitFor(() => turnRecords(seat).length === 1, { label: "record" });
+
+  const [record] = turnRecords(seat);
+  assert.equal(record.sessionId, "session-old");
+  assert.deepEqual(record.dshTurns, [2]);
+  assert.equal(record.usage.inputTokens, 1200);
+  assert.deepEqual(Object.keys(record.byModel), ["deepseek/deepseek-v4-flash"]);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("a skill added between turns changes the fingerprint, and each record names the harness that ran it", async () => {
+  const seat = startSeat({ agentEnv: { FAKE_ACP_CHUNKS: "ok" } });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  assert.match(seat.output.text(), /turn records → .*turns\.jsonl · usage: no session log for session-fake-1/);
+
+  seat.input.write("before\n");
+  await waitFor(() => turnRecords(seat).length === 1, { label: "first record" });
+  const skill = path.join(seat.dir, ".dsh", "skills", "triage", "SKILL.md");
+  fs.mkdirSync(path.dirname(skill), { recursive: true });
+  fs.writeFileSync(skill, "---\nname: triage\n---\nSort failures before fixing them.\n");
+  seat.input.write("after\n");
+  await waitFor(() => turnRecords(seat).length === 2, { label: "second record" });
+
+  const [before, after] = turnRecords(seat);
+  assert.notEqual(before.harnessFingerprint, after.harnessFingerprint);
+  assert.match(
+    seat.output.text(),
+    new RegExp(`harness changed ${before.harnessFingerprint.slice(0, 12)} → ${after.harnessFingerprint.slice(0, 12)} \\(\\+1 files\\)`),
+  );
+  const manifests = fs.readdirSync(seatFile({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }, "harness")).sort();
+  assert.deepEqual(manifests, [`${before.harnessFingerprint}.json`, `${after.harnessFingerprint}.json`].sort());
+
+  // No session log: the records say so, and the pane says it once.
+  assert.equal(before.usageSource, "unavailable");
+  assert.equal(before.usage, null);
+  assert.match(before.usageNote, /no session log/);
+  assert.equal((seat.output.text().match(/\[usage\] unavailable/g) ?? []).length, 1);
 
   seat.input.write("/quit\n");
   await seat.done;

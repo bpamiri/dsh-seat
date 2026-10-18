@@ -13,7 +13,12 @@ import path from "node:path";
 
 /** Path shape: <stateRoot>/<sessionName>/runner-state.json */
 export function sidecarPath({ stateRoot, sessionName }) {
-  return path.join(stateRoot, sanitizeSessionName(sessionName), "runner-state.json");
+  return seatFile({ stateRoot, sessionName }, "runner-state.json");
+}
+
+/** Another file in the seat's state directory: <stateRoot>/<sessionName>/<file>. */
+export function seatFile({ stateRoot, sessionName }, file) {
+  return path.join(stateRoot, sanitizeSessionName(sessionName), file);
 }
 
 /** A seat session name is `<member>@<rig>`; keep it a single safe path segment. */
@@ -22,10 +27,21 @@ export function sanitizeSessionName(sessionName) {
 }
 
 export function writeSidecar(filePath, state) {
+  writeJsonAtomic(filePath, state);
+}
+
+/** Replace a JSON file whole (tmp + rename), readable only by the seat's user. */
+export function writeJsonAtomic(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(tmp, filePath);
+}
+
+/** Append one record as a JSON line; a new file is readable only by the seat's user. */
+export function appendJsonl(filePath, record) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
 }
 
 export function readSidecar(filePath) {
