@@ -15,7 +15,14 @@ function workspace() {
 }
 
 /** Start a seat against the fake agent and return handles. */
-function startSeat({ argv = [], agentEnv = {}, posture = "floor", env = {}, onClientOptions = () => {} } = {}) {
+function startSeat({
+  argv = [],
+  agentEnv = {},
+  posture = "floor",
+  env = {},
+  onClientOptions = () => {},
+  identityResolver = null,
+} = {}) {
   const { dir, stateRoot, home } = workspace();
   const args = parseArgs(
     [
@@ -48,6 +55,7 @@ function startSeat({ argv = [], agentEnv = {}, posture = "floor", env = {}, onCl
       return fakeAgentFactory(agentEnv)(opts);
     },
     activityFactory: () => activity,
+    identityResolver,
   });
   return { args, input, output, activity, done, dir, stateRoot, home };
 }
@@ -261,6 +269,64 @@ test("an operator's telemetry choice is kept, and a patched home gets no upload 
   assert.equal(childEnv.DSH_TELEMETRY_MODE, "FEEDBACK_ONLY");
   assert.match(seat.output.text(), /dsh telemetry: operator setting kept/);
   assert.doesNotMatch(seat.output.text(), /session-log upload on/);
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("after adoption, the seat learns its node and generation and stamps activity with them", async () => {
+  let adopted = false;
+  let asked = 0;
+  const seat = startSeat({
+    agentEnv: { FAKE_ACP_CHUNKS: "ran rig whoami" },
+    identityResolver: async () => {
+      asked += 1;
+      return adopted ? { ok: true, nodeId: "node-1", generation: "gen-1" } : { ok: false, reason: "not-adopted" };
+    },
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  await waitFor(() => asked === 1, { label: "lookup at READY" });
+  assert.deepEqual(seat.activity.identities, [], "an unbound pane stays unstamped");
+
+  // `rig adopt` binds the pane, then types its claim hint (sendText + Enter).
+  adopted = true;
+  seat.input.write('\x1b[200~--- OpenRig: You have been adopted into rig "test-rig" as scratch.dev1-dsh. Run: rig whoami --json ---\x1b[201~\r');
+  await waitFor(() => seat.output.text().includes("OpenRig seat: node node-1 · generation gen-1 (adopted)"), {
+    label: "identity line",
+  });
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "claim hint turn" });
+
+  assert.deepEqual(seat.activity.identities, [{ nodeId: "node-1", generation: "gen-1" }]);
+  const lastPost = seat.activity.posts.at(-1);
+  assert.equal(lastPost.kind, "turnEnd");
+  assert.equal(lastPost.generation, "gen-1");
+
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.nodeId, "node-1");
+  assert.equal(state.generation, "gen-1");
+  assert.equal(state.exited, null, "a mid-run sidecar write keeps the exited field");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("an identity given on the command line is used as given and never looked up", async () => {
+  let asked = 0;
+  const seat = startSeat({
+    argv: ["--node-id", "node-x", "--generation", "gen-x"],
+    identityResolver: async () => {
+      asked += 1;
+      return { ok: true, nodeId: "other", generation: "other" };
+    },
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+  seat.input.write('--- OpenRig: You have been adopted into rig "r" as p.m. Run: rig whoami --json ---\n');
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "turn end" });
+
+  assert.equal(asked, 0);
+  const state = readSidecar(sidecarPath({ stateRoot: seat.stateRoot, sessionName: seat.args.sessionName }));
+  assert.equal(state.nodeId, "node-x");
+  assert.equal(state.generation, "gen-x");
 
   seat.input.write("/quit\n");
   await seat.done;

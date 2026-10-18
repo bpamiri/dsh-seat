@@ -38,6 +38,7 @@ import {
 } from "./permissions.mjs";
 import { ActivityPoster, readActivityEndpoint, defaultOpenRigHome } from "./activity.mjs";
 import { dshChildEnv, telemetryChosen, sessionLogUploadDisabled } from "./privacy.mjs";
+import { CLAIM_HINT, resolveSeatIdentity } from "./identity.mjs";
 import { sidecarPath, writeSidecar } from "./state.mjs";
 
 export const RUNNER_READY_MARKER = "[dsh-runner] READY";
@@ -46,6 +47,14 @@ export const RUNNER_ERROR_MARKER = "[dsh-runner] ERROR";
 
 const VERSION = "0.1.0";
 const DEFAULT_PROFILE = "acp";
+
+/** A delay that never holds the process open on its own. */
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
 
 // ── Pane output ─────────────────────────────────────────────────────────────
 // ACP streams deltas, so the writer tracks whether the pane is mid-line before
@@ -252,6 +261,7 @@ export async function runSeat(options) {
     env = process.env,
     clientFactory = (opts) => new AcpClient(opts),
     activityFactory = (opts) => new ActivityPoster(opts),
+    identityResolver = null,
     now = () => new Date().toISOString(),
   } = options;
 
@@ -270,7 +280,15 @@ export async function runSeat(options) {
 
   const mcpServers = args.mcpServersFile ? JSON.parse(fs.readFileSync(args.mcpServersFile, "utf8")) : [];
 
+  // The OpenRig seat this pane is: given on the command line, or learned after
+  // adoption (see refreshIdentity below).
+  let identity = { nodeId: args.nodeId ?? null, generation: args.generation ?? null };
+
+  // Each write replaces the whole sidecar, so `exited` is carried forward
+  // rather than dropped by a mid-run write that does not mention it.
+  let lastExited = null;
   const writeState = (patch = {}) => {
+    if ("exited" in patch) lastExited = patch.exited;
     writeSidecar(sidecar, {
       ready,
       launchId: args.launchId,
@@ -279,22 +297,73 @@ export async function runSeat(options) {
       posture,
       permissionMode,
       sessionId,
+      nodeId: identity.nodeId,
+      generation: identity.generation,
       runnerPid: process.pid,
       updatedAt: now(),
+      exited: lastExited,
       ...patch,
     });
   };
 
+  const endpoint = args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null;
   const activity = activityFactory({
     sessionName: args.sessionName,
-    nodeId: args.nodeId,
-    generation: args.generation,
+    nodeId: identity.nodeId,
+    generation: identity.generation,
     runtime: args.runtimeLabel,
-    endpoint: args.activity ? readActivityEndpoint(defaultOpenRigHome(env)) : null,
+    endpoint,
     onError: (err) => {
       if (args.verbose) errorOutput.write(`[dsh-seat] activity post failed: ${err.message}\n`);
     },
   });
+
+  // Explicit --node-id/--generation win; otherwise ask the daemon whose
+  // activity endpoint we already post to.
+  const resolveIdentity =
+    args.nodeId || args.generation
+      ? null
+      : identityResolver ??
+        (endpoint ? () => resolveSeatIdentity({ baseUrl: endpoint.baseUrl, sessionName: args.sessionName }) : null);
+  let identityInFlight = null;
+  let identityAskedAt = 0;
+
+  /**
+   * Ask the daemon which node and occupant generation this pane is bound to,
+   * retrying after each delay until the generation is known. Never blocks the
+   * seat: callers fire and forget, and a failure only leaves activity untrusted.
+   */
+  const refreshIdentity = (reason, retryDelays = []) => {
+    if (!resolveIdentity || identityInFlight) return identityInFlight;
+    identityAskedAt = Date.now();
+    identityInFlight = (async () => {
+      for (const delay of [0, ...retryDelays]) {
+        if (shuttingDown) return;
+        if (delay) await sleep(delay);
+        let found;
+        try {
+          found = await resolveIdentity();
+        } catch (err) {
+          found = { ok: false, reason: err.message };
+        }
+        if (shuttingDown) return;
+        if (!found?.ok) continue;
+        const next = { nodeId: found.nodeId, generation: found.generation ?? null };
+        if (next.nodeId !== identity.nodeId || next.generation !== identity.generation) {
+          identity = next;
+          activity.setIdentity?.(identity);
+          writeState({});
+          writer.line(
+            `[dsh-seat] OpenRig seat: node ${identity.nodeId} · ${identity.generation ? `generation ${identity.generation}` : "generation not yet recorded"} (${reason})`,
+          );
+        }
+        if (identity.generation) return;
+      }
+    })().finally(() => {
+      identityInFlight = null;
+    });
+    return identityInFlight;
+  };
 
   writeState({ ready: false, exited: null });
 
@@ -331,6 +400,9 @@ export async function runSeat(options) {
     if (inFlight || shuttingDown || queue.length === 0) return;
     const text = queue.shift();
     inFlight = true;
+    // Still no generation? Ask again now and then, so a seat adopted without a
+    // claim hint reaching it still becomes trusted.
+    if (!identity.generation && Date.now() - identityAskedAt > 60_000) void refreshIdentity("turn");
     activity.turnStart();
     client
       .prompt({ sessionId, text })
@@ -527,6 +599,8 @@ export async function runSeat(options) {
     activity.sessionIdentity({ sessionId });
     writer.line(RUNNER_READY_MARKER);
     writer.line("[dsh-seat] type a line + Enter to prompt · /help for local commands");
+    // A runner restarted after adoption is already bound; a new pane is not yet.
+    void refreshIdentity("ready");
   } catch (err) {
     writer.line(`${RUNNER_ERROR_MARKER} setup failed: ${err.message}`);
     writeState({ ready: false, exited: { reason: "setup-failed", error: err.message } });
@@ -545,6 +619,8 @@ export async function runSeat(options) {
       // Only a single typed line can be a local command; a pasted message that
       // happens to start with "/" goes to the agent whole.
       if (text.startsWith("/") && !text.includes("\n") && localCommand(text.trim())) return;
+      // Adoption has just bound this pane: learn the node and generation it got.
+      if (CLAIM_HINT.test(text)) void refreshIdentity("adopted", [500, 1500, 4000]);
       enqueue(text);
     },
     onInterrupt: () => {

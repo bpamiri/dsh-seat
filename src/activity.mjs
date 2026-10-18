@@ -85,6 +85,14 @@ export class ActivityPoster {
     Promise.resolve(request).catch((err) => this.#onError(err));
   }
 
+  /**
+   * Stamp later posts with the seat identity learned after adoption
+   * (src/identity.mjs): the generation is what makes a hook trusted.
+   */
+  setIdentity({ nodeId = null, generation = null } = {}) {
+    this.#identity = { ...this.#identity, nodeId, generation };
+  }
+
   turnStart(subtype = null) {
     this.#send({ hookEvent: "UserPromptSubmit", subtype });
   }
