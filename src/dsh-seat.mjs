@@ -39,7 +39,7 @@ import {
   describeDecision,
 } from "./permissions.mjs";
 import { ActivityPoster, readActivityEndpoint, defaultOpenRigHome } from "./activity.mjs";
-import { dshChildEnv, telemetryChosen, uploadsLeftOn } from "./privacy.mjs";
+import { ENV_NAME, dshChildEnv, telemetryChosen, uploadsLeftOn } from "./privacy.mjs";
 import { CLAIM_HINT, resolveSeatIdentity } from "./identity.mjs";
 import { HarnessFingerprinter, defaultAgentsHome, diffHarness } from "./fingerprint.mjs";
 import { SessionLogTail, TAKE_WAITS_MS, TURN_RECORD_SCHEMA, turnUsageFields } from "./usage.mjs";
@@ -135,6 +135,9 @@ export function parseArgs(argv, env = process.env) {
     generation: null,
     activity: true,
     resumeFallbackFresh: false,
+    scrubEnv: false,
+    passEnv: [],
+    initialPrompt: null,
     requestTimeoutMs: 0,
     verbose: false,
     help: false,
@@ -158,6 +161,8 @@ export function parseArgs(argv, env = process.env) {
     "--node-id",
     "--generation",
     "--request-timeout",
+    "--pass-env",
+    "--initial-prompt",
   ]);
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -195,6 +200,14 @@ export function parseArgs(argv, env = process.env) {
         case "--runtime-label": args.runtimeLabel = value; break;
         case "--node-id": args.nodeId = value; break;
         case "--generation": args.generation = value; break;
+        case "--pass-env":
+          if (!ENV_NAME.test(value)) throw new Error(`--pass-env takes an environment variable name, not "${value}"`);
+          args.passEnv.push(value);
+          break;
+        case "--initial-prompt":
+          if (!value.trim()) throw new Error("--initial-prompt requires non-empty text");
+          args.initialPrompt = value;
+          break;
         case "--request-timeout": {
           const parsed = Number(value);
           if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${flag} requires a non-negative number`);
@@ -209,6 +222,7 @@ export function parseArgs(argv, env = process.env) {
     switch (flag) {
       case "--no-activity": args.activity = false; break;
       case "--resume-fallback-fresh": args.resumeFallbackFresh = true; break;
+      case "--scrub-env": args.scrubEnv = true; break;
       case "--verbose": args.verbose = true; break;
       case "-h":
       case "--help": args.help = true; break;
@@ -223,6 +237,9 @@ export function parseArgs(argv, env = process.env) {
   if (!args.sessionName) args.sessionName = `${path.basename(args.cwd)}-dsh`;
   if (!args.launchId) args.launchId = randomUUID();
   args.posture = normalizePosture(args.posture);
+  // Without --scrub-env the child already gets everything; a --pass-env would
+  // read as a restriction that isn't there.
+  if (args.passEnv.length && !args.scrubEnv) throw new Error("--pass-env only applies with --scrub-env");
   return args;
 }
 
@@ -249,6 +266,9 @@ Options:
   --generation <uuid>     occupant generation for activity posts
   --no-activity           do not POST activity to the OpenRig daemon
   --resume-fallback-fresh fall back to a fresh session when resume fails
+  --scrub-env             hand dsh an allowlisted environment, not the whole one
+  --pass-env <NAME>       with --scrub-env, also pass this variable (repeatable)
+  --initial-prompt <text> send this as the first turn once the session is ready
   --request-timeout <ms>  ACP request timeout (default: 0 = wait indefinitely)
   --verbose               print ignored protocol traffic
   -h, --help              this help
@@ -508,6 +528,9 @@ export async function runSeat(options) {
       permissionMode,
       sessionName: args.sessionName,
       openrigUrl: endpoint?.baseUrl ?? null,
+      scrub: args.scrubEnv,
+      passEnv: args.passEnv,
+      model: args.model,
     }),
     requestTimeoutMs: args.requestTimeoutMs,
   });
@@ -825,6 +848,12 @@ export async function runSeat(options) {
     activity.sessionIdentity({ sessionId });
     writer.line(RUNNER_READY_MARKER);
     writer.line("[dsh-seat] type a line + Enter to prompt · /help for local commands");
+    // A managed launch has no operator at the keyboard and no claim hint, so
+    // the seat is told how to orient itself (see scripts/seat-up.sh).
+    if (args.initialPrompt) {
+      writer.line("[dsh-seat] sending the initial prompt");
+      enqueue(args.initialPrompt);
+    }
     // A runner restarted after adoption is already bound; a new pane is not yet.
     void refreshIdentity("ready");
   } catch (err) {

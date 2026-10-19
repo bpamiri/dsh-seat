@@ -617,3 +617,74 @@ test("a seat started before the daemon finds its activity endpoint when it is ad
   seat.input.write("/quit\n");
   await seat.done;
 });
+
+test("parseArgs takes --scrub-env, repeatable --pass-env and --initial-prompt, and rejects misuse", () => {
+  const args = parseArgs(
+    ["--scrub-env", "--pass-env", "JAVA_HOME", "--pass-env=LUCLI_HOME", "--initial-prompt", "run rig whoami"],
+    {},
+  );
+  assert.equal(args.scrubEnv, true);
+  assert.deepEqual(args.passEnv, ["JAVA_HOME", "LUCLI_HOME"]);
+  assert.equal(args.initialPrompt, "run rig whoami");
+
+  const plain = parseArgs([], {});
+  assert.equal(plain.scrubEnv, false, "the whole environment is still the default");
+  assert.deepEqual(plain.passEnv, []);
+  assert.equal(plain.initialPrompt, null);
+
+  assert.throws(() => parseArgs(["--scrub-env", "--pass-env", "A=B"], {}), /environment variable name/);
+  assert.throws(() => parseArgs(["--scrub-env", "--pass-env", "$(id)"], {}), /environment variable name/);
+  assert.throws(() => parseArgs(["--pass-env", "JAVA_HOME"], {}), /only applies with --scrub-env/);
+  assert.throws(() => parseArgs(["--initial-prompt", "   "], {}), /non-empty/);
+});
+
+test("with --scrub-env the dsh child gets the allowlist, not the operator's whole environment", async () => {
+  let childEnv = null;
+  const seat = startSeat({
+    argv: ["--scrub-env", "--pass-env", "JAVA_HOME"],
+    env: {
+      PATH: "/seat/bin",
+      HOME: "/home/op",
+      JAVA_HOME: "/jdk21",
+      AWS_SECRET_ACCESS_KEY: "nope",
+      DEEPSEEK_API_KEY: "nope",
+      OPENRIG_HOOK_TOKEN: "nope",
+      OPENRIG_NODE_ID: "node-1",
+    },
+    onClientOptions: (opts) => (childEnv = opts.env),
+  });
+  await waitFor(() => seat.output.text().includes(RUNNER_READY_MARKER), { label: "READY" });
+
+  assert.equal(childEnv.PATH, "/seat/bin");
+  assert.equal(childEnv.HOME, "/home/op");
+  assert.equal(childEnv.JAVA_HOME, "/jdk21", "a --pass-env name crosses");
+  assert.equal(childEnv.OPENRIG_NODE_ID, "node-1", "seat identity crosses");
+  assert.equal(childEnv.OPENRIG_SESSION_NAME, "dev1-dsh@test-rig");
+  assert.equal(childEnv.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(childEnv.DEEPSEEK_API_KEY, undefined, "no provider key without a provider/model");
+  assert.equal(childEnv.OPENRIG_HOOK_TOKEN, undefined);
+  assert.equal(childEnv.DSH_HOME, seat.home);
+  assert.equal(childEnv.DSH_TELEMETRY_DISABLED, "1");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});
+
+test("the initial prompt is the seat's first turn once the session is ready", async () => {
+  const { dir } = workspace();
+  const capture = path.join(dir, "prompts.json");
+  const seat = startSeat({
+    argv: ["--initial-prompt", "Run rig whoami --json first."],
+    agentEnv: { FAKE_ACP_CHUNKS: "ok", FAKE_ACP_CAPTURE: capture },
+  });
+  await waitFor(() => seat.output.text().includes("── turn end (end_turn) ──"), { label: "first turn end" });
+
+  const text = seat.output.text();
+  assert.ok(text.indexOf(RUNNER_READY_MARKER) < text.indexOf("[dsh-seat] sending the initial prompt"));
+  assert.equal(turnRecords(seat).length, 1);
+  const received = fs.readFileSync(capture, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(received, [["Run rig whoami --json first."]], "the agent got exactly the initial prompt");
+
+  seat.input.write("/quit\n");
+  await seat.done;
+});

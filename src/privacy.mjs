@@ -46,17 +46,86 @@ export function telemetryChosen(env) {
  * infer which seat it is. The runner's --session-name is the seat's canonical
  * address, so it always wins over an inherited value. OPENRIG_URL is filled in
  * from the daemon endpoint only when the operator hasn't set one.
+ *
+ * With `scrub`, the child starts from an allowlist instead of the operator's
+ * whole environment (see childEnvAllowlist). dsh's shell tool inherits this
+ * environment, so anything that crosses here — an API key exported in the pane's
+ * shell, a cloud token — is readable by the agent's own commands.
  */
-export function dshChildEnv(env, { dshHome, permissionMode, sessionName = null, openrigUrl = null }) {
+export function dshChildEnv(env, {
+  dshHome,
+  permissionMode,
+  sessionName = null,
+  openrigUrl = null,
+  scrub = false,
+  passEnv = [],
+  model = null,
+}) {
   const hasUrl = typeof env.OPENRIG_URL === "string" && env.OPENRIG_URL.trim() !== "";
+  const base = scrub ? pickEnv(env, childEnvAllowlist({ passEnv, model })) : env;
   return {
-    ...env,
+    ...base,
     DSH_HOME: dshHome,
     DSH_PERMISSION_MODE: permissionMode,
     ...(telemetryChosen(env) ? {} : { DSH_TELEMETRY_DISABLED: "1" }),
     ...(sessionName ? { OPENRIG_SESSION_NAME: sessionName } : {}),
     ...(!hasUrl && openrigUrl ? { OPENRIG_URL: openrigUrl } : {}),
   };
+}
+
+/** What every scrubbed child keeps: a working shell and locale. */
+export const BASELINE_ENV_VARS = ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"];
+
+/**
+ * OpenRig identity and instance routing, so `rig whoami` / `rig send` from inside
+ * the seat resolve to this seat on this daemon. Arbitrary OPENRIG_* settings and
+ * the hook token are not forwarded.
+ */
+export const OPENRIG_ENV_VARS = [
+  "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION",
+  "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT", "OPENRIG_SHARED_DOCS_ROOT",
+];
+
+/** The operator's own telemetry choice for dsh (see telemetryChosen). */
+export const DSH_CHOICE_VARS = ["DSH_TELEMETRY_DISABLED", "DSH_TELEMETRY_MODE"];
+
+/**
+ * Provider keys dsh's bundled providers read when the seat home has no
+ * `.credentials.yaml`. One crosses only when --model names its provider
+ * (`deepseek/...`); adding a provider here is a reviewed change, because the key
+ * becomes readable by every command the agent runs.
+ */
+export const PROVIDER_ENV_VARS = {
+  deepseek: "DEEPSEEK_API_KEY",
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+};
+
+/** An environment variable name the runner will accept for --pass-env. */
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The provider segment of a `provider/id` model value, if any. */
+export function providerFromModel(model) {
+  const trimmed = typeof model === "string" ? model.trim() : "";
+  const slash = trimmed.indexOf("/");
+  return slash > 0 ? trimmed.slice(0, slash) : null;
+}
+
+/** The names a scrubbed child keeps, in a stable order. */
+export function childEnvAllowlist({ passEnv = [], model = null } = {}) {
+  const names = [...BASELINE_ENV_VARS, ...OPENRIG_ENV_VARS, ...DSH_CHOICE_VARS, ...passEnv];
+  const providerVar = PROVIDER_ENV_VARS[providerFromModel(model) ?? ""];
+  if (providerVar) names.push(providerVar);
+  return [...new Set(names)];
+}
+
+function pickEnv(env, names) {
+  const picked = {};
+  for (const name of names) {
+    if (typeof env[name] === "string") picked[name] = env[name];
+  }
+  return picked;
 }
 
 /** The request fields a seat home can switch off, by their dsh row id. */
