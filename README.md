@@ -252,7 +252,9 @@ It runs in the seat's pane and directory, and `exec`s the runner:
   provider (`deepseek/...`).
 - **`--initial-prompt`**: a managed launch gets no claim hint, so the first turn tells the agent to run
   `rig whoami --json` and check its queue (`INITIAL_PROMPT=off` turns it off).
-- **Posture** `floor` (default) or `auto`; `full_bypass` is refused.
+- **Floor only.** A managed launch runs unattended, so `POSTURE` must be `floor`; `auto` and
+  `full_bypass` are refused. `auto` stays available on the runner itself (`--posture auto`), as a
+  deliberate choice by whoever starts it.
 - `HOME` is left alone: dsh's credential lookup, `rig` and git all read it.
 
 Settings are `DSH_SEAT_<KEY>` in the environment, else `<KEY>=<value>` lines in

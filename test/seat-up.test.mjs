@@ -119,16 +119,31 @@ test("a malformed session id in runner-state.json is not passed on", () => {
 });
 
 test("the environment overrides seat.env, and the seat name can come from the argument", () => {
-  const fx = fixture();
-  const run = seatUp(fx, { env: { OPENRIG_SESSION_NAME: "", DSH_SEAT_POSTURE: "auto" }, args: [SEAT] });
+  const fx = fixture({ seatEnv: { MODEL: "from-file" } });
+  const run = seatUp(fx, { env: { OPENRIG_SESSION_NAME: "", DSH_SEAT_MODEL: "deepseek/from-env" }, args: [SEAT] });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.flag("--session-name"), SEAT);
-  assert.equal(run.flag("--posture"), "auto");
+  assert.equal(run.flag("--model"), "deepseek/from-env");
+});
+
+test("a managed launch is floor-only: auto is refused from seat.env and from the environment", () => {
+  for (const run of [
+    seatUp(fixture({ seatEnv: { POSTURE: "auto" } })),
+    seatUp(fixture(), { env: { DSH_SEAT_POSTURE: "auto" } }),
+  ]) {
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /POSTURE 'auto' is not allowed here: a managed launch is floor-only/);
+    assert.match(run.stderr, /--posture auto as a deliberate choice/);
+    assert.equal(run.argv.length, 0, "nothing would have run");
+  }
+  const floor = seatUp(fixture({ seatEnv: { POSTURE: "floor" } }));
+  assert.equal(floor.status, 0, floor.stderr);
+  assert.equal(floor.flag("--posture"), "floor");
 });
 
 test("seat-up refuses what would make the seat unsafe or wrong", () => {
   const refusals = [
-    [{ POSTURE: "full_bypass" }, /POSTURE 'full_bypass' is not allowed/],
+    [{ POSTURE: "full_bypass" }, /POSTURE 'full_bypass' is not allowed here: a managed launch is floor-only/],
     [{ NODE_MAJOR: "99" }, /pinned to Node 99/],
     [{ NODE: "node" }, /NODE must be an absolute path/],
     [{ JAVA_HOME: "/nonexistent-jdk" }, /has no bin\/java/],

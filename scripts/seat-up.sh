@@ -26,7 +26,7 @@
 #   DSH_COMMAND     dsh executable (default: dsh, found on PATH after NODE's dir)
 #   DSH_HOME        the seat's dsh home (default: <seat>/home, built on first use)
 #   SOURCE_HOME     the home a new seat home is built from (default: ~/.dsh)
-#   POSTURE         floor | auto (default floor; full_bypass is refused here)
+#   POSTURE         floor only (the default); auto and full_bypass are refused here
 #   MODEL           ACP model value, passed as --model
 #   TMP_ROOT        parent of the seat's TMPDIR (default /private/tmp/dsh-seat, else /tmp/dsh-seat)
 #   INITIAL_PROMPT  the first turn's text, or "off" (default: orient with rig whoami)
@@ -96,10 +96,10 @@ export PATH
 
 # ── Posture ─────────────────────────────────────────────────────────────────
 POSTURE="$(conf POSTURE floor)"
-case "$POSTURE" in
-  floor | auto) ;;
-  *) die "POSTURE '$POSTURE' is not allowed here (floor or auto)" ;;
-esac
+# A managed launch runs unattended, so it stays on the floor. auto (escalations
+# allowed once) is still available on the runner itself, as a deliberate choice.
+[ "$POSTURE" = floor ] \
+  || die "POSTURE '$POSTURE' is not allowed here: a managed launch is floor-only. To run with auto, start the runner directly with --posture auto as a deliberate choice."
 
 # ── dsh and its home ────────────────────────────────────────────────────────
 DSH_COMMAND="$(conf DSH_COMMAND dsh)"
