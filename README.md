@@ -231,6 +231,49 @@ delivers to the agent as its first prompt, and takes as its cue to learn its nod
 path launches the stub harness (materialize does not launch), so the label is inert for an adopted
 seat — but it is wrong, and anything that tries to *relaunch* this node will do the wrong thing.
 
+## Managed launch: `scripts/seat-up.sh`
+
+`scripts/seat-up.sh` is the command OpenRig runs when it starts the seat itself: a community-harness
+preset (`runtime: dsh`, OpenRig 0.6.12 and later), or a `send_text` startup action on a terminal seat.
+It runs in the seat's pane and directory, and `exec`s the runner:
+
+- **Node pinned by absolute path** (`NODE`, checked against `NODE_MAJOR`, default 24), and put first on
+  `PATH` so `dsh` runs on it too. **`JAVA_HOME` pinned** the same way when set.
+- **Resume:** the `sessionId` in `<seat>/runner-state.json` is passed as `--session`, so a relaunch
+  continues the conversation. A resume that fails is a loud failure, not a silent fresh start.
+- **The seat's own `DSH_HOME`** (`<seat>/home`, built from `~/.dsh` on first use; never your live home).
+- **A private `TMPDIR`**: `/private/tmp/dsh-seat/<seat>` (else `/tmp/dsh-seat/<seat>`), mode 0700. A
+  symlink, or a directory you don't own, is refused. dsh's `workspace-write` sandbox already allows
+  `os.tmpdir()`, so this is writable without loosening the posture.
+- **`--scrub-env`**: dsh gets an allowlist (shell basics, OpenRig identity, your telemetry choice, the
+  `ENV_*` names below), not your whole environment. dsh's shell tool inherits it, so an API key or token
+  exported in the pane is no longer readable by the agent's commands. dsh then reads its provider key
+  from the seat home's `.credentials.yaml`; a provider env key crosses only when `MODEL` names its
+  provider (`deepseek/...`).
+- **`--initial-prompt`**: a managed launch gets no claim hint, so the first turn tells the agent to run
+  `rig whoami --json` and check its queue (`INITIAL_PROMPT=off` turns it off).
+- **Posture** `floor` (default) or `auto`; `full_bypass` is refused.
+- `HOME` is left alone: dsh's credential lookup, `rig` and git all read it.
+
+Settings are `DSH_SEAT_<KEY>` in the environment, else `<KEY>=<value>` lines in
+`$OPENRIG_HOME/state/dsh/<seat>/seat.env`, read as data, never sourced (the full list is at the top of
+the script). `ENV_<NAME>=<value>` exports `NAME` to the seat, with `{seat_tmp}` standing for its
+`TMPDIR`. [`examples/managed/seat.env.example`](examples/managed/seat.env.example) is a seat that runs a
+Java/LuCLI test suite; `DSH_SEAT_DRY_RUN=1` prints what would run.
+
+```yaml
+# ~/.openrig/community-harnesses/dsh.yaml (OpenRig 0.6.12+)
+format: 1
+name: dsh
+command: /path/to/dsh-seat/scripts/seat-up.sh
+limits: [resume handled by runner, no projection, activity from screen]
+```
+
+**macOS: setuid binaries can't run in the sandbox.** Seatbelt refuses to `exec` a setuid program, so
+`/bin/ps` (setuid root) fails with `Operation not permitted` under any posture but `full_bypass`, and no
+writable root changes that. `/usr/bin/pgrep` isn't setuid and works; scripts the seat runs should use it
+for process checks.
+
 ## Field notes from the first live adoption
 
 A dsh seat was adopted into a throwaway rig (`dsh-scratch`) on 2026-10-15 and driven through the real

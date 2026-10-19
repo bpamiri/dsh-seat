@@ -7,7 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { dshChildEnv, telemetryChosen, sessionLogVerdict, sessionLogUploadDisabled, uploadRowVerdict, uploadsLeftOn } from "../src/privacy.mjs";
+import { childEnvAllowlist, dshChildEnv, providerFromModel, telemetryChosen, sessionLogVerdict, sessionLogUploadDisabled, uploadRowVerdict, uploadsLeftOn } from "../src/privacy.mjs";
 
 const MAKE_SEAT_HOME = fileURLToPath(new URL("../scripts/make-seat-home.sh", import.meta.url));
 
@@ -161,4 +161,42 @@ test("make-seat-home does not switch compression on an existing sessions root", 
   const patch = fs.readFileSync(path.join(target, "cordis.patch.yml"), "utf8");
   assert.equal(sessionLogVerdict(patch), true);
   assert.doesNotMatch(patch, /session-persistence-jsonl/);
+});
+
+test("a scrubbed child keeps the allowlist and drops everything else", () => {
+  const source = {
+    PATH: "/bin", HOME: "/home/op", TMPDIR: "/seat/tmp", LANG: "C.UTF-8",
+    OPENRIG_NODE_ID: "n1", OPENRIG_HOOK_TOKEN: "hook-secret", OPENRIG_DEBUG: "1",
+    GITHUB_TOKEN: "gh-secret", DEEPSEEK_API_KEY: "ds-secret", OPENAI_API_KEY: "oa-secret",
+    JAVA_HOME: "/jdk21", DSH_TELEMETRY_MODE: "FEEDBACK_ONLY",
+  };
+  const env = dshChildEnv(source, {
+    dshHome: "/h", permissionMode: "workspace-write", sessionName: "s@r", scrub: true, passEnv: ["JAVA_HOME"],
+  });
+  assert.deepEqual(Object.keys(env).sort(), [
+    "DSH_HOME", "DSH_PERMISSION_MODE", "DSH_TELEMETRY_MODE", "HOME", "JAVA_HOME", "LANG",
+    "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "PATH", "TMPDIR",
+  ]);
+  assert.equal(env.DSH_TELEMETRY_DISABLED, undefined, "the operator's telemetry choice still stands");
+
+  // Unscrubbed (the default) is unchanged: the whole environment crosses.
+  const whole = dshChildEnv(source, { dshHome: "/h", permissionMode: "workspace-write" });
+  assert.equal(whole.GITHUB_TOKEN, "gh-secret");
+});
+
+test("a provider key crosses a scrubbed child only for the provider --model names", () => {
+  assert.equal(providerFromModel("deepseek/deepseek-chat"), "deepseek");
+  assert.equal(providerFromModel("deepseek-chat"), null);
+  assert.equal(providerFromModel(" /x"), null);
+  assert.equal(providerFromModel(null), null);
+
+  const source = { DEEPSEEK_API_KEY: "ds", OPENAI_API_KEY: "oa" };
+  const named = dshChildEnv(source, { dshHome: "/h", permissionMode: "workspace-write", scrub: true, model: "deepseek/deepseek-chat" });
+  assert.equal(named.DEEPSEEK_API_KEY, "ds");
+  assert.equal(named.OPENAI_API_KEY, undefined);
+
+  const bare = dshChildEnv(source, { dshHome: "/h", permissionMode: "workspace-write", scrub: true, model: "deepseek-chat" });
+  assert.equal(bare.DEEPSEEK_API_KEY, undefined, "no provider prefix, no key: the seat home's credentials file is used");
+
+  assert.ok(childEnvAllowlist({ model: "unknown/x" }).every((name) => !name.endsWith("_API_KEY")));
 });
