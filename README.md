@@ -273,6 +273,8 @@ limits: [resume handled by runner, no projection, activity from screen]
 `/bin/ps` (setuid root) fails with `Operation not permitted` under any posture but `full_bypass`, and no
 writable root changes that. `/usr/bin/pgrep` isn't setuid and works; scripts the seat runs should use it
 for process checks.
+`/usr/sbin/lsof` (e.g. `lsof -ti :PORT -sTCP:LISTEN`) and `kill -0` aren't setuid either; both run under
+dsh's profile and see the seat's own processes.
 
 ## Field notes from the first live adoption
 
