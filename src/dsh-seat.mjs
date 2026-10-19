@@ -503,7 +503,12 @@ export async function runSeat(options) {
     command: args.dshCommand,
     args: ["--profile", args.profile],
     cwd: args.cwd,
-    env: dshChildEnv(env, { dshHome: args.dshHome, permissionMode }),
+    env: dshChildEnv(env, {
+      dshHome: args.dshHome,
+      permissionMode,
+      sessionName: args.sessionName,
+      openrigUrl: endpoint?.baseUrl ?? null,
+    }),
     requestTimeoutMs: args.requestTimeoutMs,
   });
 
