@@ -27,6 +27,33 @@ test("the dsh child gets telemetry off unless the operator chose a setting", () 
   assert.equal(telemetryChosen({}), false);
 });
 
+test("the dsh child is named for the agent's own rig calls", () => {
+  const env = dshChildEnv({ PATH: "/bin" }, {
+    dshHome: "/h", permissionMode: "workspace-write",
+    sessionName: "dev1-dsh@wheels-dsh", openrigUrl: "http://127.0.0.1:7433",
+  });
+  assert.equal(env.OPENRIG_SESSION_NAME, "dev1-dsh@wheels-dsh");
+  assert.equal(env.OPENRIG_URL, "http://127.0.0.1:7433");
+
+  // The seat's own name always wins over one inherited from the parent shell.
+  const inherited = dshChildEnv({ OPENRIG_SESSION_NAME: "someone-else@rig" }, {
+    dshHome: "/h", permissionMode: "workspace-write", sessionName: "dev1-dsh@wheels-dsh",
+  });
+  assert.equal(inherited.OPENRIG_SESSION_NAME, "dev1-dsh@wheels-dsh");
+
+  // An operator-set OPENRIG_URL is kept; no endpoint known means no URL is invented.
+  const keptUrl = dshChildEnv({ OPENRIG_URL: "http://10.0.0.5:7433" }, {
+    dshHome: "/h", permissionMode: "workspace-write", sessionName: "s@r", openrigUrl: "http://127.0.0.1:7433",
+  });
+  assert.equal(keptUrl.OPENRIG_URL, "http://10.0.0.5:7433");
+  const noUrl = dshChildEnv({}, { dshHome: "/h", permissionMode: "workspace-write", sessionName: "s@r" });
+  assert.equal(noUrl.OPENRIG_URL, undefined);
+
+  // Without a session name (direct library use), nothing OpenRig is added.
+  const bare = dshChildEnv({}, { dshHome: "/h", permissionMode: "workspace-write" });
+  assert.equal(bare.OPENRIG_SESSION_NAME, undefined);
+});
+
 test("sessionLogVerdict reads the session-log row of a patch", () => {
   assert.equal(sessionLogVerdict("- id: session-log-deepseek\n  config:\n    enabled: false\n"), true);
   assert.equal(sessionLogVerdict("- id: 'session-log-deepseek'\n  disabled: true\n"), true);

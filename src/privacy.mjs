@@ -39,13 +39,23 @@ export function telemetryChosen(env) {
  * The environment the runner hands the dsh child: the operator's environment,
  * the seat's home and permission mode, and telemetry off unless the operator
  * chose otherwise.
+ *
+ * It also names the seat for the agent's own `rig` calls. Without
+ * OPENRIG_SESSION_NAME a `rig send` from inside the seat reaches its peer as
+ * "<unknown sender>", because the pane is a node process and the CLI cannot
+ * infer which seat it is. The runner's --session-name is the seat's canonical
+ * address, so it always wins over an inherited value. OPENRIG_URL is filled in
+ * from the daemon endpoint only when the operator hasn't set one.
  */
-export function dshChildEnv(env, { dshHome, permissionMode }) {
+export function dshChildEnv(env, { dshHome, permissionMode, sessionName = null, openrigUrl = null }) {
+  const hasUrl = typeof env.OPENRIG_URL === "string" && env.OPENRIG_URL.trim() !== "";
   return {
     ...env,
     DSH_HOME: dshHome,
     DSH_PERMISSION_MODE: permissionMode,
     ...(telemetryChosen(env) ? {} : { DSH_TELEMETRY_DISABLED: "1" }),
+    ...(sessionName ? { OPENRIG_SESSION_NAME: sessionName } : {}),
+    ...(!hasUrl && openrigUrl ? { OPENRIG_URL: openrigUrl } : {}),
   };
 }
 
