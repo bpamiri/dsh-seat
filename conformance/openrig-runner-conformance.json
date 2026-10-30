@@ -1,0 +1,380 @@
+{
+  "check": "openrig-runner-conformance",
+  "format": 1,
+  "runner": "/tmp/dsh-seat-existing/bin/dsh-seat --agent-command {agent}",
+  "name": "dsh",
+  "results": [
+    {
+      "id": "1",
+      "title": "Handshake: the launch record comes only after the conversation is open",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens a conversation with session/new",
+          "ok": true
+        },
+        {
+          "name": "no launch record while session/new is still unanswered",
+          "ok": true
+        },
+        {
+          "name": "a launch record arrives after session/new is answered",
+          "ok": true
+        },
+        {
+          "name": "the record is written after the answer",
+          "ok": true
+        },
+        {
+          "name": "format 1, this attempt, this preset",
+          "ok": true
+        },
+        {
+          "name": "nativeRef is the agent's conversation id",
+          "ok": true
+        },
+        {
+          "name": "producer names the runner's versions",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "1b",
+      "title": "A failed handshake writes no launch record and claims no turn",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "initialize error: no conversation in a launch record",
+          "ok": true
+        },
+        {
+          "name": "initialize error: no accepted prompt or idle report",
+          "ok": true
+        },
+        {
+          "name": "initialize exit: no conversation in a launch record",
+          "ok": true
+        },
+        {
+          "name": "initialize exit: no accepted prompt or idle report",
+          "ok": true
+        },
+        {
+          "name": "session/new error: no conversation in a launch record",
+          "ok": true
+        },
+        {
+          "name": "session/new error: no accepted prompt or idle report",
+          "ok": true
+        },
+        {
+          "name": "session/new exit: no conversation in a launch record",
+          "ok": true
+        },
+        {
+          "name": "session/new exit: no accepted prompt or idle report",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "title": "Input framing, queued messages and cancel",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "one pasted block is exactly one session/prompt",
+          "ok": true
+        },
+        {
+          "name": "the prompt holds the whole block, byte for byte",
+          "ok": true
+        },
+        {
+          "name": "the next block starts the next turn",
+          "ok": true
+        },
+        {
+          "name": "a block sent mid-turn waits for the next turn",
+          "ok": true
+        },
+        {
+          "name": "a line reading /abort inside a block isn't control",
+          "ok": true
+        },
+        {
+          "name": "a block that is exactly /abort sends session/cancel",
+          "ok": true
+        },
+        {
+          "name": "the cancelled turn reports Stop/cancelled",
+          "ok": true
+        },
+        {
+          "name": "one /abort sends one session/cancel",
+          "ok": true
+        },
+        {
+          "name": "the waiting block becomes the next prompt",
+          "ok": true
+        },
+        {
+          "name": "Ctrl-C outside a paste sends session/cancel",
+          "ok": true
+        },
+        {
+          "name": "cancelled is reported only on the agent's own stop reason",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "title": "Activity: turn boundaries, posted in order with the seat's identity",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "UserPromptSubmit/accepted when the prompt is given",
+          "ok": true
+        },
+        {
+          "name": "the accepted post names a turnId",
+          "ok": true
+        },
+        {
+          "name": "Stop/end_turn when the turn ends",
+          "ok": true
+        },
+        {
+          "name": "accepted comes before the turn's end",
+          "ok": true
+        },
+        {
+          "name": "every post carries the contract's fields",
+          "ok": true
+        },
+        {
+          "name": "every post uses the hook token",
+          "ok": true
+        },
+        {
+          "name": "every post names this seat and preset",
+          "ok": true
+        },
+        {
+          "name": "sequence rises with each post",
+          "ok": true
+        },
+        {
+          "name": "livenessSeconds, when given, is a whole number from 1 to 3600",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "title": "Permissions: refused at once, shown, and held as needs input",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "the answer is a refusal, never an allow option",
+          "ok": true
+        },
+        {
+          "name": "Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "what was asked is shown in the pane",
+          "ok": true
+        },
+        {
+          "name": "no idle Stop or beat while holding that attention",
+          "ok": true
+        },
+        {
+          "name": "the next prompt is accepted as usual, which clears it",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "5",
+      "title": "Generation: every post carries the launch's occupant generation",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "the runner posted something",
+          "ok": true
+        },
+        {
+          "name": "generation is OPENRIG_OCCUPANT_GENERATION on every post",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "6",
+      "title": "Resume: the same conversation, or an honest missing or unconfirmed",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "same: the agent is asked to reopen OPENRIG_RESUME_REF",
+          "ok": true
+        },
+        {
+          "name": "same: in the launch's working folder",
+          "ok": true
+        },
+        {
+          "name": "same: the record reports that conversation",
+          "ok": true
+        },
+        {
+          "name": "same: no new conversation starts",
+          "ok": true
+        },
+        {
+          "name": "missing: the agent's own not-found is reported as error: missing",
+          "ok": true
+        },
+        {
+          "name": "missing: no new conversation starts",
+          "ok": true
+        },
+        {
+          "name": "other failure: not reported missing or resumed",
+          "ok": true
+        },
+        {
+          "name": "other failure: no new conversation starts",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "title": "Death mid-turn: Stop/<preset>_exited, never an idle report",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "the agent exits mid-turn",
+          "ok": true
+        },
+        {
+          "name": "Stop/dsh_exited is posted",
+          "ok": true
+        },
+        {
+          "name": "no idle Stop after the exit",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "7b",
+      "title": "Errors: a failed prompt is a runtime error, not a permission request",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "a failed session/prompt posts Notification/runtime_error",
+          "ok": true
+        },
+        {
+          "name": "it isn't reported as a permission request",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "7c",
+      "title": "Shutdown: closing the pane ends the agent (proposed in section 9; advisory)",
+      "status": "advisory",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "closing the pane ends the agent process",
+          "ok": true
+        }
+      ],
+      "proposed": true,
+      "met": true
+    },
+    {
+      "id": "8",
+      "title": "Unknown requests from the agent get -32601, and the runner carries on",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the unknown request is answered -32601",
+          "ok": true
+        },
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "the next prompt still goes through",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "title": "First input: OPENRIG_FIRST_INPUT's exact bytes are the first prompt",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "the first prompt is the file's bytes, newlines and spaces included",
+          "ok": true
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "pass": 11,
+    "fail": 0,
+    "skip": 0,
+    "advisory": 1
+  }
+}

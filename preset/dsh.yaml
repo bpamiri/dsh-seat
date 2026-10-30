@@ -1,0 +1,22 @@
+# OpenRig runner preset for DeepSeek Harness (dsh) over ACP v1.
+# Copy to $OPENRIG_HOME/community-harnesses/dsh.yaml.
+format: 1
+name: dsh
+command: dsh-seat
+maintainer: bpamiri
+runner: true
+launch_result: true
+first_input: true
+passes_model: true
+resume: true
+limits:
+  - permission requests are refused at once (first version); a job that needs an edit or command approved cannot finish
+  - a prompt whose whole text is /abort cannot be sent; Ctrl-C inside a paste also aborts
+  - without a TTY the runner reads input line by line; the channel is not binary-safe
+  - fork is unsupported
+  - guidance, skills and startup files are not placed by OpenRig for community harnesses and are not projected by this runner
+  - the declared model is mapped onto dsh's advertised model option; if it is not advertised, dsh's own default remains
+  - activity is turn boundaries, permission notices and exits, not per-token or per-tool working posts
+  - idle liveness is one 30 s report at turn end, with no periodic heartbeat; a seat idle longer than about 60 s may read unknown
+  - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
+  - resume uses ACP session/resume; a dsh "not resumable" or not-found refusal is reported as missing, any other failure is left unconfirmed
