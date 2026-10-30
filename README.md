@@ -14,13 +14,14 @@ Apache-2.0.
 
 | Contract area | This runner |
 |---|---|
-| **Identity** | Writes the launch record to `OPENRIG_LAUNCH_RESULT` after `session/new` (or a successful resume), with `format: 1`, the attempt, the preset name, the agent's `nativeRef`, and a `producer` naming the runner/ACP versions. A failed handshake writes no conversation. |
+| **Identity** | Writes the launch record to `OPENRIG_LAUNCH_RESULT` after `session/new` (or a successful resume), with `format: 1`, the attempt, the preset name, the agent's `nativeRef`, and a `producer` naming the runner, dsh and ACP versions (`dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1`). A failed handshake writes no conversation. |
 | **Activity** | `UserPromptSubmit/accepted` with a `turnId`; `Stop/<stopReason>` with `livenessSeconds: 30`; `Notification/permission_prompt`; `Notification/runtime_error`; `Stop/dsh_exited` on agent exit. Posts are queued in order and never block the agent. |
 | **Input** | Raw mode + bracketed paste. One submitted block — newlines included — becomes exactly one `session/prompt`, byte for byte. A block sent mid-turn queues for the next turn. |
 | **Control** | A block that is exactly `/abort`, or Ctrl-C outside a paste, sends ACP `session/cancel`. `Stop/cancelled` is posted only when the agent itself returns `stopReason: "cancelled"`. |
 | **Permissions** | Every `session/request_permission` is refused at once with `{"outcome":{"outcome":"cancelled"}}`, the requested tool title is shown in the pane, `Notification/permission_prompt` is posted, and the attention is held until the next accepted prompt. Unknown agent requests get JSON-RPC `-32601`. |
-| **Resume** | With `OPENRIG_RESUME_REF`, calls ACP `session/resume` (falling back to `session/load` only if the method is unsupported). Never calls `session/new` on a resume. dsh's "not resumable"/not-found refusal is recorded as `error: "missing"`; any other failure is left unconfirmed. |
-| **First input / model** | `OPENRIG_FIRST_INPUT` bytes become the first prompt. `OPENRIG_MODEL` is mapped onto dsh's advertised `model` config option; an unadvertised model leaves dsh's own default. |
+| **Resume** | With `OPENRIG_RESUME_REF`, calls ACP `session/resume` (falling back to `session/load` only for other ACP agents that advertise it). Never calls `session/new` on a resume. dsh 0.2.1-rc.2 advertises `sessionCapabilities.resume` and no `loadSession`; `session/load` returns `-32601`. dsh's "not resumable"/not-found refusal is recorded as `error: "missing"`; any other failure is left unconfirmed. |
+| **First input / model** | `OPENRIG_FIRST_INPUT` bytes become the first prompt. `OPENRIG_MODEL` is matched against dsh's advertised `model` option: `provider/model` (provider exact or a substring such as `deepseek` for `deepseek-official`, model id unique), a unique bare model id, or an exact opaque selector. The mapped value is applied with `session/set_config_option` on fresh launches **and on resumes** (from the resume's `configOptions`). A value that cannot be mapped is reported in the pane with what dsh advertised and dsh's own default remains; a raw value is never sent. |
+| **Agent environment** | The agent child gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, `DSH_HOME`, and (when `OPENRIG_MODEL` names a provider) that provider's key if set. It does not inherit `OPENRIG_ACTIVITY_HOOK_TOKEN` or other OpenRig variables. |
 
 ## Install
 
@@ -63,15 +64,22 @@ limits: ...   # see preset/dsh.yaml
 - Fork is unsupported.
 - Guidance, skills and startup files are not placed by OpenRig for community harnesses and are
   not projected by this runner.
-- The declared model is mapped onto dsh's advertised model option; if it is not advertised, dsh's
-  own default remains.
+- The declared model is matched by `provider/model` (provider exact or a substring, unique model
+  id), a unique bare id, or an exact opaque selector, and applied on fresh launches and resumes. A value that cannot be mapped is reported
+  in the pane with dsh's advertised choices; dsh's own default remains.
+- The agent child gets a baseline environment plus `DSH_HOME` and, when the declared model names a
+  provider, that provider's key. It does not inherit the activity hook token or other OpenRig
+  variables.
+- Reopening uses `session/resume`; tested with dsh 0.2.1-rc.2, which advertises
+  `sessionCapabilities.resume` and no `loadSession` (`session/load` returns `-32601`). The
+  `session/load` fallback is for other ACP agents only.
 - Activity reports turn boundaries, permission notices and exits, not per-token or per-tool
   working posts.
 - Idle liveness is one 30 s report at turn end, with no periodic heartbeat; a seat idle longer
   than about 60 s may read unknown.
 - Stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup.
 - Resume uses ACP `session/resume`; a dsh "not resumable" or not-found refusal is reported as
-  missing, any other failure is left unconfirmed.
+  missing, any other failure is left unconfirmed. A changed declared model is applied on resume.
 
 ## Conformance
 
@@ -112,8 +120,12 @@ results are committed under `conformance/`.
 Against `dsh 0.2.1-rc.2` (`acp` profile), without a model turn: `initialize` succeeds; `session/new`
 opens a conversation; after `session/close`, `session/resume` with the same id reopens it; an unknown
 id is refused with `-32602 Invalid params: session is not resumable: <id>` and a live one with
-`session is already active: <id>`. No paid model turn was run, and no attempt was made to verify a
-turn's answer. The section 10 journey — a real seat, one multi-line message, working → idle, a
+`session is already active: <id>`. The model resolver was also exercised live against dsh's
+advertised choices: bare `deepseek-v4-flash`, `deepseek/deepseek-v4-flash` and
+`deepseek-official/deepseek-v4-flash` all resolve to dsh's opaque selector; an unadvertised value is
+reported and not sent; and a different declared model applied after a reopen is visible in the next
+reopen's `currentValue`. No paid model turn was run, and no attempt was made to verify a turn's
+answer. The section 10 journey — a real seat, one multi-line message, working → idle, a
 refused permission, `/abort`, and a real resume — is still the useful real-agent check.
 
 ## What the conformance check cannot prove
@@ -123,7 +135,8 @@ refused permission, `/abort`, and a real resume — is still the useful real-age
 - How OpenRig reads these posts (working / idle / needs input / unknown after exit) is OpenRig's
   side and its own tests.
 - The model handoff has no wire the checker can see; this runner maps the declared model onto
-  dsh's advertised selector, but the effective model is shown as unknown by OpenRig.
+  dsh's advertised selector (including on resumes), but the effective model is shown as unknown by
+  OpenRig.
 - Real pty paste/truncation, a paid model turn, and a stored-credential login are not covered.
 
 ## Prior adopt-path runner

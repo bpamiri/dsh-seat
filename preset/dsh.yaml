@@ -15,8 +15,10 @@ limits:
   - without a TTY the runner reads input line by line; the channel is not binary-safe
   - fork is unsupported
   - guidance, skills and startup files are not placed by OpenRig for community harnesses and are not projected by this runner
-  - the declared model is mapped onto dsh's advertised model option; if it is not advertised, dsh's own default remains
+  - reopening uses ACP session/resume; tested with dsh 0.2.1-rc.2, which advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); the session/load fallback is for other ACP agents
+  - the declared model is matched to dsh's advertised model option by provider/model (provider exact or a substring, unique model id), a unique bare id, or an exact opaque selector; a value that cannot be mapped is reported in the pane and dsh's own default remains; it is applied on fresh launches and on resumes
+  - the agent child gets only PATH, HOME, USER, LOGNAME, TERM, LANG, LC_ALL, SHELL, TMPDIR, DSH_HOME and the declared provider's key when set; it does not inherit the activity hook token or other OpenRig variables
   - activity is turn boundaries, permission notices and exits, not per-token or per-tool working posts
   - idle liveness is one 30 s report at turn end, with no periodic heartbeat; a seat idle longer than about 60 s may read unknown
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
-  - resume uses ACP session/resume; a dsh "not resumable" or not-found refusal is reported as missing, any other failure is left unconfirmed
+  - resume reports dsh's "not resumable"/not-found refusal as missing, and any other failure as unconfirmed

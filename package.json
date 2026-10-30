@@ -1,6 +1,6 @@
 {
   "name": "dsh-seat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A dsh (DeepSeek Harness) runner preset for OpenRig's runner contract",
   "license": "Apache-2.0",
   "type": "module",

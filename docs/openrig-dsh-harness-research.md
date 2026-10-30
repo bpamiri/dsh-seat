@@ -1,5 +1,11 @@
 # OpenRig + "dsh" (DeepSeek Harness): support, roadmap, and the bring-your-own-harness story
 
+> **Historical (pre-contract).** This note predates OpenRig's 0.7.6 harness/runner
+> contract. Some commands and claims below (the `rig adopt` flow, `session-<uuid>` ids) are
+> outdated; see [README](../README.md) and [preset/dsh.yaml](../preset/dsh.yaml) for the
+> current runner.
+
+
 Research date: 2026‑10‑15. OpenRig latest release at time of writing: **0.6.10** (released 2026‑10‑12).
 Method: `web_search` + `web_fetch` of openrig.dev, the GitHub API (issues/PRs/discussions/releases), and a
 shallow clone of `mvschwarz/openrig@main` (`fd097bfd`, 2026‑10‑15) grepped for the relevant terms.

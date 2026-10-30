@@ -1,5 +1,11 @@
 # Adding DSH seats to an OpenRig rig — recommendation
 
+> **Historical (pre-contract).** This note predates OpenRig's 0.7.6 harness/runner
+> contract. Some commands and claims below (the `rig adopt` flow, `session-<uuid>` ids) are
+> outdated; see [README](../README.md) and [preset/dsh.yaml](../preset/dsh.yaml) for the
+> current runner.
+
+
 Scope: how to get `dsh` (DeepSeek Harness, `@deepseek-ai/dsh` 0.2.0-rc.2) seats into a rig on
 OpenRig 0.6.7 (installed) / 0.6.10 (latest release).
 
@@ -80,7 +86,7 @@ Contract: `packages/daemon/src/domain/runtime-adapter.ts:139-173` (`runtime`, `l
 | `deliverStartup` | Over ACP as `session/prompt` after `session/new`, and/or as pre-written files above (file-drop is dsh's strongest area and needs no protocol). |
 | `launchHarness` | Type `node dsh-runner.js --session-name <seat@rig> --cwd <cwd> [--session <dsh-id>] [--posture <p>]` into the pane. The runner spawns `dsh --profile acp` as a child (stdio JSON-RPC), does `initialize`, then `session/new` or `session/resume`, prints `[dsh-runner] READY`, and writes the launch-scoped sidecar `<stateRoot>/<session>/runner-state.json` carrying `{ready, launchId, sessionId, exited?}`. Posture → `DSH_PERMISSION_MODE=read-only\|workspace-write\|danger-full-access`. |
 | `checkReady` | Launch-scoped sidecar poll (`launchId` match) + `READY` marker, mirroring `pi-runtime-adapter.ts:379-417`. No pane heuristics. |
-| resume token | The dsh session id (`session-<uuid>`), `resumeType: "dsh_session_id"`. **ACP is the only resume path worth building on.** |
+| resume token | The dsh session id (a bare UUID; older drafts wrote `session-<uuid>`), `resumeType: "dsh_session_id"`. **ACP is the only resume path worth building on.** |
 | activity / liveness | `session/update` + turn boundaries → `POST /api/activity/hooks` with `{sessionName,nodeId,generation,runtime,hookEvent,…}` (exactly what `pi-runner.ts:571-581` does). |
 | permissions | `session/request_permission` answered by posture: `full_bypass` → allow; otherwise decline escalation and let `DSH_PERMISSION_MODE` do the work. |
 
@@ -88,7 +94,7 @@ Contract: `packages/daemon/src/domain/runtime-adapter.ts:139-173` (`runtime`, `l
 
 - **No identity concept.** No `--name`/`--label`. OpenRig owns naming (`<member>@<rig>`); `DSH_SESSION_ID`
   and the session title are the only handles.
-- **Session ids cannot be pre-assigned** — always `session-<uuid>`, and default `headless` prints no id at
+- **Session ids cannot be pre-assigned** — always a bare UUID, and default `headless` prints no id at
   all; only `--json` reveals it in the opening `session` event.
 - **Resume is surface-specific.** `headless --session-id` refuses a session that records an agent preset
   (`dsh-headless/lib/index.js:223`) and requires an exactly matching cwd; Web-created sessions carry a

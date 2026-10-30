@@ -1,7 +1,7 @@
 {
   "check": "openrig-runner-conformance",
   "format": 1,
-  "runner": "/tmp/dsh-seat-existing/bin/dsh-seat --agent-command {agent}",
+  "runner": "/Users/peter/GitHub/bpamiri/dsh-seat/bin/dsh-seat --agent-command {agent}",
   "name": "dsh",
   "results": [
     {

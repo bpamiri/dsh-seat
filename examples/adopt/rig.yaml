@@ -1,3 +1,5 @@
+# Historical (pre-0.7.6) adopt-path example. Kept for the legacy `rig adopt` flow;
+# the supported path today is the runner preset in ../../preset/dsh.yaml.
 version: "0.2"
 name: dsh-scratch
 
@@ -9,11 +11,10 @@ pods:
         label: DSH dev
         agent_ref: "local:agents/dev1-dsh"
         profile: default
-        # NOTE: dsh is not an accepted runtime (SUPPORTED_RUNTIMES has only
-        # claude-code, codex, pi, omp, terminal, stub) and preflight rejects it.
-        # `rig adopt` materializes topology WITHOUT launching, so this label is
-        # inert for an adopted seat — but it is wrong, and anything that tries to
-        # relaunch this node will do the wrong thing. See ../README.md.
+        # Historical adopt-path label: this example predates the 0.7.6 runner
+        # preset, when dsh was not a wired runtime and preflight rejected it.
+        # `rig adopt` materializes topology WITHOUT launching, so this label was
+        # inert for the adopted seat. Use ../../preset/dsh.yaml for a real seat.
         runtime: stub
         cwd: "."    # replaced by start-seat.sh / the adopter with the real repo path
     edges: []

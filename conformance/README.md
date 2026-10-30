@@ -21,8 +21,8 @@ node check-runner.mjs \
   --name dsh --resume --first-input --json
 ```
 
-The `runner` field in `openrig-runner-conformance.json` therefore shows the machine-specific
-absolute path used for this run (`/tmp/dsh-seat-existing/bin/dsh-seat ...`). Everything else is the
+The `runner` field in `openrig-runner-conformance.json` shows the stable checkout path used for
+this run (`/Users/peter/GitHub/bpamiri/dsh-seat/bin/dsh-seat ...`). Everything else is the
 checker's verbatim output.
 
 Environment: macOS, Node v26.0.0, tmux 3.7c. The fake agent stands in for dsh, so no model,
@@ -59,8 +59,17 @@ Against `dsh 0.2.1-rc.2`, `acp` profile, no model turn:
   runner wrote `{"format":1,"attempt":"attempt-real-1","harness":"dsh","error":"missing","producer":"dsh-seat 0.2.0; ACP 1"}`.
 
 A live session is refused with `session is already active: <id>`, which this runner does not
-report as missing. No paid model turn was run; section 10's real seat journey is still the useful
-real-agent check.
+report as missing; dsh advertises `sessionCapabilities.resume` and no `loadSession`, and
+`session/load` answers `-32601`.
+
+The model handoff was also exercised live against dsh's advertised choices, through a stdio proxy
+that records the ACP wire (no model turn): bare `deepseek-v4-pro`, `deepseek/deepseek-v4-pro` and
+`deepseek-official/deepseek-v4-pro` all sent the advertised opaque selector
+`["deepseek-official","deepseek-v4-pro"]` and dsh accepted it (its reply's `currentValue` changed);
+`acme/nope` produced the pane warning with the advertised list and sent no value; and a resume with
+`OPENRIG_MODEL=deepseek/deepseek-v4-pro` reopened the requested session and then sent the same
+selector. No paid model turn was run; section 10's real seat journey is still the useful real-agent
+check.
 
 ## What this does not prove
 

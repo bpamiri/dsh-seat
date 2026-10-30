@@ -17,8 +17,11 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { buildAgentEnv } from "../src/env.mjs";
+import { resolveModelChoice } from "../src/model.mjs";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
+const DSH_VERSION = "0.2.1-rc.2";
 const PROTOCOL_VERSION = 1;
 const OPENRIG = {
   url: env("OPENRIG_URL"),
@@ -79,7 +82,7 @@ function writeLaunch(record) {
   }
 }
 function producer() {
-  return `dsh-seat ${VERSION}; ACP ${PROTOCOL_VERSION}`;
+  return `dsh-seat ${VERSION}; dsh ${DSH_VERSION}; ACP ${PROTOCOL_VERSION}`;
 }
 function recordConversation(nativeRef) {
   writeLaunch({ format: 1, attempt: OPENRIG.attempt, harness: presetName, nativeRef, producer: producer() });
@@ -191,7 +194,9 @@ function startAgent() {
     shell: true,
     detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
+    // The agent's shell must not inherit the activity hook token or the rest of
+    // OpenRig's environment: baseline + DSH_HOME (+ the declared provider key).
+    env: buildAgentEnv(process.env, { model: OPENRIG.model }),
   });
   child.on("error", (error) => {
     warn(`could not start the agent: ${error.message}`);
@@ -388,19 +393,25 @@ async function openConversation() {
     const result = await request("session/new", { cwd: process.cwd(), mcpServers: [] }, { timeoutMs: 30000 });
     sessionId = typeof result?.sessionId === "string" ? result.sessionId : "";
     if (!sessionId) throw new Error("session/new returned no session id");
-    recordConversation(sessionId);
+    // Apply the model before the launch record: OpenRig may consider the seat
+    // ready as soon as the record exists, so the declared model must already be
+    // in effect (or reported as unappliable) by then.
     await applyModel(result?.configOptions);
+    recordConversation(sessionId);
   }
 }
 
 async function reopen(ref) {
   const params = { sessionId: ref, cwd: process.cwd(), mcpServers: [] };
+  let result;
   try {
-    await request("session/resume", params, { timeoutMs: 30000 });
+    result = await request("session/resume", params, { timeoutMs: 30000 });
   } catch (error) {
     // ACP's loadSession is the alternative reopen method some agents advertise.
+    // dsh 0.2.1-rc.2 advertises sessionCapabilities.resume only and answers
+    // session/load with -32601; this fallback is for other ACP agents.
     if (error.code === -32601 || /method not found/i.test(error.message)) {
-      await request("session/load", params, { timeoutMs: 30000 });
+      result = await request("session/load", params, { timeoutMs: 30000 });
     } else if (isMissing(error)) {
       recordMissing();
       await drainPosts();
@@ -416,6 +427,9 @@ async function reopen(ref) {
   // dsh's session/resume does not re-report the id; an error-free reopen is the
   // contract's "same conversation reopened" and the requested ref is recorded.
   sessionId = ref;
+  // A changed model on restore must apply too, from the resume's configOptions,
+  // before the record makes the seat ready.
+  await applyModel(result?.configOptions);
   recordConversation(ref);
 }
 
@@ -429,28 +443,16 @@ function isMissing(error) {
 
 async function applyModel(configOptions) {
   if (!OPENRIG.model) return;
-  const option = Array.isArray(configOptions) ? configOptions.find((entry) => entry?.id === "model") : undefined;
-  if (!option?.options) { warn(`declared model ${OPENRIG.model} ignored: the agent advertises no model option`); return; }
-  const choices = [];
-  const walk = (nodes) => {
-    for (const node of Array.isArray(nodes) ? nodes : []) {
-      if (node && Array.isArray(node.options)) walk(node.options);
-      else if (node && typeof node.value === "string") choices.push(node);
-    }
-  };
-  walk(option.options);
-  const [provider, ...rest] = OPENRIG.model.split("/");
-  const modelId = rest.join("/") || OPENRIG.model;
-  const match = choices.find((choice) => {
-    try {
-      const value = JSON.parse(choice.value);
-      if (Array.isArray(value)) return (value[0] === provider && value[1] === modelId) || value[1] === OPENRIG.model;
-    } catch { /* not an opaque selector */ }
-    return choice.value === OPENRIG.model || choice.name === OPENRIG.model;
-  });
-  if (!match) { warn(`declared model ${OPENRIG.model} is not advertised by the agent; leaving its default`); return; }
+  const resolved = resolveModelChoice(configOptions, OPENRIG.model);
+  if (!resolved.ok) {
+    // Reported, never silently ignored: the pane says what was asked and what
+    // dsh advertised; dsh's own default stays in effect.
+    warn(`declared model ${OPENRIG.model} not applied: ${resolved.error}`);
+    return;
+  }
   try {
-    await request("session/set_config_option", { sessionId, configId: "model", value: match.value }, { timeoutMs: 15000 });
+    await request("session/set_config_option", { sessionId, configId: "model", value: resolved.value }, { timeoutMs: 15000 });
+    line(`[dsh-seat] model: ${resolved.label}`);
   } catch (error) {
     warn(`could not apply the declared model: ${error.message}`);
   }
