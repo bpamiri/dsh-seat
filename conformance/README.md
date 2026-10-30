@@ -54,13 +54,24 @@ Summary: **11 pass, 0 fail, 0 skip, 1 advisory (met)**.
 Against `dsh 0.2.1-rc.2`, `acp` profile, no model turn:
 
 - the shipped runner reopened an existing, closed conversation through `session/resume` and wrote
-  `{"format":1,"attempt":"attempt-real-1","harness":"dsh","nativeRef":"d10a03a2-9829-408f-a590-0147f6a37b09","producer":"dsh-seat 0.2.0; ACP 1"}`;
+  `{"format":1,"attempt":"attempt-real-1","harness":"dsh","nativeRef":"d10a03a2-9829-408f-a590-0147f6a37b09","producer":"dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1"}`;
 - for an unknown id, dsh answered `-32602 Invalid params: session is not resumable: <id>` and the
-  runner wrote `{"format":1,"attempt":"attempt-real-1","harness":"dsh","error":"missing","producer":"dsh-seat 0.2.0; ACP 1"}`.
+  runner wrote `{"format":1,"attempt":"attempt-real-1","harness":"dsh","error":"missing","producer":"dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1"}`.
 
 A live session is refused with `session is already active: <id>`, which this runner does not
 report as missing; dsh advertises `sessionCapabilities.resume` and no `loadSession`, and
 `session/load` answers `-32601`.
+
+The environment and DSH_HOME were checked live (real dsh, no model turn): the agent child received
+the baseline shell, OpenRig identity/routing (`OPENRIG_URL`, `OPENRIG_SESSION_NAME`, `OPENRIG_NODE_ID`,
+`OPENRIG_RUNTIME`, `OPENRIG_OCCUPANT_GENERATION`, `OPENRIG_HOME`, `OPENRIG_HOST`, `OPENRIG_PORT`),
+`DSH_HOME`, `DSH_TELEMETRY_DISABLED=1`, and the declared provider key; it did **not** receive
+`OPENRIG_ACTIVITY_HOOK_TOKEN` or `OPENRIG_LAUNCH_RESULT`. With `DSH_HOME` unset the runner provisioned
+`$OPENRIG_HOME/state/dsh/<session>/dsh-home`; a clean simulated operator `~/.dsh` was byte-for-byte
+unchanged (no `sessions`, `storages` or `.anonymous-user-id`). An explicit
+`DSH_HOME=$HOME/.dsh` exited 1 before spawning the agent. (`PWD`, `SHLVL`, `_` and
+`__CF_USER_TEXT_ENCODING` in the proxy's key list are added by the shell that launches the agent
+command, not by the runner's allowlist.)
 
 The model handoff was also exercised live against dsh's advertised choices, through a stdio proxy
 that records the ACP wire (no model turn): bare `deepseek-v4-pro`, `deepseek/deepseek-v4-pro` and

@@ -3,14 +3,14 @@
 // the launch-record/resume paths (drive the real entry with a fake ACP agent).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { resolveModelChoice } from "../src/model.mjs";
-import { buildAgentEnv } from "../src/env.mjs";
+import { buildAgentEnv, providerKeyForModel } from "../src/env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bin = join(here, "..", "bin", "dsh-seat");
@@ -44,30 +44,50 @@ test("model resolver: exact provider/model, bare unique id, official provider, u
   assert.equal(resolveModelChoice(ambiguous, "same").ok, false);
 });
 
-test("agent env: baseline + DSH_HOME + only the declared provider key", () => {
+test("agent env: identity/routing + telemetry off + DSH_HOME + provider key, never the hook token", () => {
   const source = {
-    PATH: "/bin", HOME: "/home/x", DSH_HOME: "/state/dsh", DEEPSEEK_API_KEY: "sk-test",
+    PATH: "/bin", HOME: "/home/x", DEEPSEEK_API_KEY: "sk-test",
+    OPENRIG_URL: "http://127.0.0.1:9", OPENRIG_SESSION_NAME: "seat@rig", OPENRIG_NODE_ID: "node-1",
+    OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-1", OPENRIG_HOME: "/openrig",
     OPENRIG_ACTIVITY_HOOK_TOKEN: "hook-secret", OPENRIG_LAUNCH_RESULT: "/tmp/record", SOMETHING: "no",
   };
-  const env = buildAgentEnv(source, { model: "deepseek/deepseek-v4-flash" });
+  const env = buildAgentEnv(source, { model: "deepseek-official/deepseek-v4-flash", dshHome: "/seat/home" });
   assert.equal(env.PATH, "/bin");
-  assert.equal(env.DSH_HOME, "/state/dsh");
+  assert.equal(env.DSH_HOME, "/seat/home");
   assert.equal(env.DEEPSEEK_API_KEY, "sk-test");
+  assert.equal(env.OPENRIG_SESSION_NAME, "seat@rig");
+  assert.equal(env.OPENRIG_URL, "http://127.0.0.1:9");
+  assert.equal(env.OPENRIG_NODE_ID, "node-1");
+  assert.equal(env.OPENRIG_RUNTIME, "dsh");
+  assert.equal(env.OPENRIG_OCCUPANT_GENERATION, "gen-1");
+  assert.equal(env.DSH_TELEMETRY_DISABLED, "1");
   assert.equal(env.OPENRIG_ACTIVITY_HOOK_TOKEN, undefined);
   assert.equal(env.OPENRIG_LAUNCH_RESULT, undefined);
   assert.equal(env.SOMETHING, undefined);
-  const noProvider = buildAgentEnv(source, { model: "deepseek-v4-flash" });
-  assert.equal(noProvider.DEEPSEEK_API_KEY, undefined);
+  // Bare ids and the deepseek-official provider both select the DeepSeek key.
+  assert.equal(providerKeyForModel("deepseek-v4-flash"), "DEEPSEEK_API_KEY");
+  assert.equal(providerKeyForModel("deepseek-official/deepseek-v4-pro"), "DEEPSEEK_API_KEY");
+  assert.equal(buildAgentEnv(source, { model: "deepseek-v4-flash", dshHome: "/h" }).DEEPSEEK_API_KEY, "sk-test");
+  // An operator telemetry choice is forwarded, not overridden.
+  const chosen = buildAgentEnv({ ...source, DSH_TELEMETRY_MODE: "OFF" }, { model: null, dshHome: "/h" });
+  assert.equal(chosen.DSH_TELEMETRY_DISABLED, undefined);
+  assert.equal(chosen.DSH_TELEMETRY_MODE, "OFF");
 });
 
-function start(t, { mode = "fresh", model = null, resume = null, extraEnv = {} } = {}) {
+function start(t, {
+  mode = "fresh", model = null, resume = null, extraEnv = {}, dshHome = "explicit", home = process.env.HOME,
+  openrigHome = null,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dsh-seat-contract-"));
   const log = join(dir, "agent.jsonl");
   const envLog = join(dir, "agent-env.json");
   const record = join(dir, "launch", "record.json");
+  const resolvedDshHome = dshHome === "explicit" ? join(dir, "dsh-home") : dshHome;
   const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --env-log ${envLog} --mode ${mode}`], {
     env: {
-      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      PATH: process.env.PATH, HOME: home,
+      ...(resolvedDshHome ? { DSH_HOME: resolvedDshHome } : {}),
+      ...(openrigHome ? { OPENRIG_HOME: openrigHome } : {}),
       OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "attempt-1",
       OPENRIG_SESSION_NAME: "test@rig", OPENRIG_NODE_ID: "node-1", OPENRIG_RUNTIME: "dsh",
       OPENRIG_OCCUPANT_GENERATION: "gen-1", OPENRIG_ACTIVITY_HOOK_TOKEN: "hook-secret",
@@ -110,6 +130,11 @@ test("fresh launch: record after session/new and the declared model applied", as
   assert.equal(agentEnv.OPENRIG_ACTIVITY_HOOK_TOKEN, undefined);
   assert.equal(agentEnv.OPENRIG_LAUNCH_RESULT, undefined);
   assert.equal(agentEnv.DSH_HOME, join(run.dir, "dsh-home"));
+  assert.equal(agentEnv.OPENRIG_SESSION_NAME, "test@rig");
+  assert.equal(agentEnv.OPENRIG_NODE_ID, "node-1");
+  assert.equal(agentEnv.OPENRIG_RUNTIME, "dsh");
+  assert.equal(agentEnv.OPENRIG_OCCUPANT_GENERATION, "gen-1");
+  assert.equal(agentEnv.DSH_TELEMETRY_DISABLED, "1");
 });
 
 test("unadvertised model is reported, not silently ignored, and no raw value is sent", async (t) => {
@@ -141,4 +166,40 @@ test("resume missing: records error missing and starts no conversation", async (
     producer: "dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1",
   });
   assert.equal(lines(run.log).some((m) => m.method === "session/new"), false);
+});
+
+test("unset DSH_HOME provisions a per-seat home and does not write the operator's ~/.dsh", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "dsh-seat-home-"));
+  const operator = join(home, ".dsh");
+  mkdirSync(join(operator, "profiles", "acp"), { recursive: true });
+  writeFileSync(join(operator, "profiles", "acp", "cordis.yml"), "profile\n");
+  writeFileSync(join(operator, "marker"), "untouched\n");
+  const openrigHome = join(home, "openrig");
+  const run = start(t, { dshHome: null, home, openrigHome });
+  const record = await waitFor(() => json(run.record));
+  assert.ok(record, `no record; pane: ${run.stdout()}`);
+  const agentEnv = json(run.envLog);
+  assert.match(agentEnv.DSH_HOME, new RegExp(`^${openrigHome}/state/dsh/.+/dsh-home$`));
+  assert.equal(agentEnv.DSH_TELEMETRY_DISABLED, "1");
+  assert.equal(agentEnv.OPENRIG_ACTIVITY_HOOK_TOKEN, undefined);
+  assert.equal(readFileSync(join(operator, "marker"), "utf8"), "untouched\n");
+  for (const leaked of ["sessions", "storages", ".anonymous-user-id"]) {
+    assert.equal(existsSync(join(operator, leaked)), false, `operator home gained ${leaked}`);
+  }
+  assert.equal(readFileSync(join(agentEnv.DSH_HOME, "profiles", "acp", "cordis.yml"), "utf8"), "profile\n");
+  assert.match(readFileSync(join(agentEnv.DSH_HOME, "cordis.patch.yml"), "utf8"), /session-log-deepseek[\s\S]*enabled: false/);
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+});
+
+test("refuses the operator's own DSH_HOME before spawning the agent", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "dsh-seat-operator-"));
+  const operator = join(home, ".dsh");
+  mkdirSync(operator, { recursive: true });
+  const run = start(t, { dshHome: operator, home });
+  await waitFor(() => run.child.exitCode !== null);
+  assert.equal(run.child.exitCode, 1);
+  assert.match(run.stdout(), /refusing DSH_HOME/);
+  assert.equal(existsSync(run.record), false);
+  assert.equal(existsSync(run.envLog), false);
+  t.after(() => rmSync(home, { recursive: true, force: true }));
 });

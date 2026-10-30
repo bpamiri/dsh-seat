@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildAgentEnv } from "../src/env.mjs";
+import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
 
 const VERSION = "0.3.0";
@@ -189,14 +190,15 @@ class AcpError extends Error {
   }
 }
 
-function startAgent() {
+function startAgent(dshHome) {
   child = spawn(agentCommand, {
     shell: true,
     detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
-    // The agent's shell must not inherit the activity hook token or the rest of
-    // OpenRig's environment: baseline + DSH_HOME (+ the declared provider key).
-    env: buildAgentEnv(process.env, { model: OPENRIG.model }),
+    // Baseline + OpenRig identity/routing + dsh's telemetry choice, the seat's
+    // own DSH_HOME, and only the declared provider's key. Never the hook token
+    // or the runner-only launch/attempt/resume variables.
+    env: buildAgentEnv(process.env, { model: OPENRIG.model, dshHome }),
   });
   child.on("error", (error) => {
     warn(`could not start the agent: ${error.message}`);
@@ -499,7 +501,16 @@ async function stop(code, why) {
 }
 
 async function main() {
-  startAgent();
+  const prepared = prepareDshHome(process.env);
+  if (!prepared.ok) {
+    warn(prepared.error);
+    process.exitCode = 1;
+    return;
+  }
+  if (prepared.provisioned) {
+    line(`[dsh-seat] DSH_HOME ${prepared.home}${prepared.sourceProfile ? " (copied the operator's acp profile; no credential file)" : " (new; no operator acp profile found)"}`);
+  }
+  startAgent(prepared.home);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     out.write("\x1b[?2004h");

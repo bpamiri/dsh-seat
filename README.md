@@ -21,7 +21,7 @@ Apache-2.0.
 | **Permissions** | Every `session/request_permission` is refused at once with `{"outcome":{"outcome":"cancelled"}}`, the requested tool title is shown in the pane, `Notification/permission_prompt` is posted, and the attention is held until the next accepted prompt. Unknown agent requests get JSON-RPC `-32601`. |
 | **Resume** | With `OPENRIG_RESUME_REF`, calls ACP `session/resume` (falling back to `session/load` only for other ACP agents that advertise it). Never calls `session/new` on a resume. dsh 0.2.1-rc.2 advertises `sessionCapabilities.resume` and no `loadSession`; `session/load` returns `-32601`. dsh's "not resumable"/not-found refusal is recorded as `error: "missing"`; any other failure is left unconfirmed. |
 | **First input / model** | `OPENRIG_FIRST_INPUT` bytes become the first prompt. `OPENRIG_MODEL` is matched against dsh's advertised `model` option: `provider/model` (provider exact or a substring such as `deepseek` for `deepseek-official`, model id unique), a unique bare model id, or an exact opaque selector. The mapped value is applied with `session/set_config_option` on fresh launches **and on resumes** (from the resume's `configOptions`). A value that cannot be mapped is reported in the pane with what dsh advertised and dsh's own default remains; a raw value is never sent. |
-| **Agent environment** | The agent child gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, `DSH_HOME`, and (when `OPENRIG_MODEL` names a provider) that provider's key if set. It does not inherit `OPENRIG_ACTIVITY_HOOK_TOKEN` or other OpenRig variables. |
+| **Agent environment** | The child gets the baseline shell, OpenRig's identity/routing variables (`OPENRIG_SESSION_NAME`, `OPENRIG_NODE_ID`, `OPENRIG_RUNTIME`, `OPENRIG_OCCUPANT_GENERATION`, `OPENRIG_HOME/URL/HOST/PORT`), the seat's own `DSH_HOME`, dsh's telemetry choice (`DSH_TELEMETRY_DISABLED=1` unless the operator set one), and the declared provider's key when set. It does not inherit the activity hook token or the runner-only launch/attempt/resume variables. |
 
 ## Install
 
@@ -38,6 +38,16 @@ cp preset/dsh.yaml "${OPENRIG_HOME:-$HOME/.openrig}/community-harnesses/dsh.yaml
 
 The preset's command is `dsh-seat`; it starts `dsh --profile acp` unless you pass
 `--agent-command` (for example `dsh-seat --agent-command 'dsh --profile acp'`).
+
+### DSH_HOME
+
+A seat needs its own writable `DSH_HOME`: dsh rewrites the profile on every boot and writes
+`sessions`, `storages` and `.anonymous-user-id` into the home. With `DSH_HOME` unset, the runner
+provisions `$OPENRIG_HOME/state/dsh/<session>/dsh-home` (or `~/.openrig/...`), copying the operator's
+`~/.dsh/profiles/acp` when it exists and linking the shared `profiles/node_modules`; it writes a
+`cordis.patch.yml` that turns off dsh's session-log and plugin-package-inventory uploads. It never
+copies or links `.credentials.yaml`. If `DSH_HOME` is explicitly the operator's `~/.dsh`, the runner
+refuses to start; point it at a per-seat writable home instead.
 
 ### The preset
 
@@ -67,9 +77,13 @@ limits: ...   # see preset/dsh.yaml
 - The declared model is matched by `provider/model` (provider exact or a substring, unique model
   id), a unique bare id, or an exact opaque selector, and applied on fresh launches and resumes. A value that cannot be mapped is reported
   in the pane with dsh's advertised choices; dsh's own default remains.
-- The agent child gets a baseline environment plus `DSH_HOME` and, when the declared model names a
-  provider, that provider's key. It does not inherit the activity hook token or other OpenRig
-  variables.
+- The agent child gets the baseline shell, OpenRig identity/routing variables, its own `DSH_HOME`,
+  dsh's telemetry choice, and the declared provider's key. `DSH_TELEMETRY_DISABLED=1` is set unless
+  the operator chose a telemetry setting; the activity hook token and runner-only launch variables
+  never cross.
+- A per-seat `DSH_HOME` is provisioned when `DSH_HOME` is unset; an explicit `DSH_HOME=$HOME/.dsh`
+  (the operator's home) is refused. The generated home disables dsh's session-log and plugin-inventory
+  uploads via `cordis.patch.yml`.
 - Reopening uses `session/resume`; tested with dsh 0.2.1-rc.2, which advertises
   `sessionCapabilities.resume` and no `loadSession` (`session/load` returns `-32601`). The
   `session/load` fallback is for other ACP agents only.
@@ -123,9 +137,10 @@ id is refused with `-32602 Invalid params: session is not resumable: <id>` and a
 `session is already active: <id>`. The model resolver was also exercised live against dsh's
 advertised choices: bare `deepseek-v4-flash`, `deepseek/deepseek-v4-flash` and
 `deepseek-official/deepseek-v4-flash` all resolve to dsh's opaque selector; an unadvertised value is
-reported and not sent; and a different declared model applied after a reopen is visible in the next
-reopen's `currentValue`. No paid model turn was run, and no attempt was made to verify a turn's
-answer. The section 10 journey — a real seat, one multi-line message, working → idle, a
+reported and not sent; and a different declared model applied after a reopen is visible in the
+`set_config_option` reply's `currentValue` (dsh does not persist the selection across close+resume;
+the runner re-applies the declared model on every resume). No paid model turn was run, and no
+attempt was made to verify a turn's answer. The section 10 journey — a real seat, one multi-line message, working → idle, a
 refused permission, `/abort`, and a real resume — is still the useful real-agent check.
 
 ## What the conformance check cannot prove
