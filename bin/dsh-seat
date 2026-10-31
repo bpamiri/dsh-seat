@@ -210,9 +210,11 @@ export function createActivityReporter({
       return true;
     },
     // Message and thought chunks are frequent: at most one active post per
-    // throttleMs per turn so a burst of chunks cannot flood the endpoint.
+    // throttleMs per turn so a burst of chunks cannot flood the endpoint. An
+    // exit or shutdown also suppresses it: shutdown() leaves the turn open, so
+    // a chunk already buffered then must not post.
     messageChunk() {
-      if (!turn || attention) return false;
+      if (!turn || attention || dead) return false;
       const at = now();
       if (at - turn.lastChunkPostAt < throttleMs) return false;
       turn.lastChunkPostAt = at;

@@ -288,6 +288,25 @@ test("activity: no working post while attention is held or after the turn ended"
   assert.equal(reporter.messageChunk(), false, "the turn is gone");
 });
 
+test("activity: a chunk after shutdown or agent exit posts nothing, even with the turn open", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  // shutdown()/agentExited() leave the turn open, so the dead guard is the only
+  // reason these chunks are suppressed; without it, the first chunk of a turn
+  // (the 10 s window is still open) would post and this would fail.
+  const shutdownRun = activityFixture();
+  shutdownRun.reporter.beginTurn("1");
+  assert.ok(shutdownRun.reporter.turn, "the turn is still open when shutdown begins");
+  shutdownRun.reporter.shutdown();
+  assert.equal(shutdownRun.reporter.messageChunk(), false, "no chunk post after shutdown");
+  assert.deepEqual(kinds(shutdownRun.posts), ["UserPromptSubmit/accepted"], "nothing else was posted");
+
+  const exitRun = activityFixture();
+  exitRun.reporter.beginTurn("2");
+  exitRun.reporter.agentExited();
+  assert.equal(exitRun.reporter.messageChunk(), false, "no chunk post after agent exit");
+  assert.deepEqual(kinds(exitRun.posts), ["UserPromptSubmit/accepted"]);
+});
+
 test("activity: idle beats run only while idle, and stop on accept, attention and exit", (t) => {
   t.mock.timers.enable({ apis: MOCK_APIS });
   const { posts, reporter } = activityFixture();
@@ -362,8 +381,8 @@ test("activity: a cancel-requested turn posts no idle until the prompt settles",
 });
 
 test("activity: the real runner posts accepted/tool/message/stop with one turnId", async (t) => {
-  // The only new test that opens a listening port: a loopback stand-in for the
-  // activity endpoint. Per the operator CLEAR (19:58Z) nothing was executed.
+  // The only test in this file that opens a listening port: a loopback stand-in
+  // for the activity endpoint captures the runner's real post sequence.
   const posted = [];
   const server = createServer((req, res) => {
     let body = "";
