@@ -15,9 +15,9 @@
 // The agent command defaults to `dsh --profile acp`.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
@@ -666,11 +666,17 @@ async function main() {
   }
 }
 
-// Run only when executed as the seat runner; importing the file (the contract
-// tests do, for the reporter) must not spawn an agent or read seat state.
-const startedDirectly = (() => {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  try { return import.meta.url === pathToFileURL(entry).href; } catch { return false; }
-})();
-if (startedDirectly) void main();
+// True only when this file is the process entrypoint. Both sides go through
+// realpath: a symlinked install (`npm link` puts a symlink on PATH) or a
+// /tmp -> /private/tmp alias resolves to the same file as import.meta.url,
+// while importing the file for its exports must still not run main().
+export function isEntrypoint(argv1, moduleUrl) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint(process.argv[1], import.meta.url)) void main();

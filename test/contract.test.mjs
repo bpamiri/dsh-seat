@@ -3,7 +3,7 @@
 // the launch-record/resume paths (drive the real entry with a fake ACP agent).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -25,7 +25,7 @@ for (const key of ["OPENRIG_URL", "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_HOME"
   savedOpenrigEnv[key] = process.env[key];
   delete process.env[key];
 }
-const { createActivityReporter } = await import(pathToFileURL(bin).href);
+const { createActivityReporter, isEntrypoint } = await import(pathToFileURL(bin).href);
 for (const [key, value] of Object.entries(savedOpenrigEnv)) {
   if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
@@ -394,4 +394,21 @@ test("activity: the real runner posts accepted/tool/message/stop with one turnId
     assert.equal(post.runtime, "dsh");
   }
   assert.equal(stop.livenessSeconds, 60);
+});
+
+test("entrypoint guard: a symlinked invocation is started directly; an import is not", (t) => {
+  // npm link installs bin/dsh-seat as a symlink on PATH (and macOS /tmp is an
+  // alias of /private/tmp). argv[1] is then the invoked path while
+  // import.meta.url is the real one, so the guard must compare realpaths or the
+  // runner would import and exit silently.
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-entry-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const link = join(dir, "dsh-seat");
+  symlinkSync(bin, link);
+  const moduleUrl = pathToFileURL(bin).href;
+  assert.equal(isEntrypoint(link, moduleUrl), true, "a symlinked path must run main");
+  assert.equal(isEntrypoint(bin, moduleUrl), true, "the real path is the entrypoint");
+  assert.equal(isEntrypoint(process.argv[1], moduleUrl), false, "importing the module must not run main");
+  assert.equal(isEntrypoint(undefined, moduleUrl), false);
+  assert.equal(isEntrypoint(join(dir, "missing"), moduleUrl), false, "a missing path is not the entrypoint");
 });
