@@ -175,3 +175,78 @@ test("a symlinked seat temp directory is refused, not followed", () => {
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /is a symlink/);
 });
+
+// ── An honest --fresh: follow what the launch asked for ─────────────────────
+test("OPENRIG_RESUME_REF resumes exactly that ref and ignores runner-state.json", () => {
+  const fx = fixture({ runnerState: { sessionId: "sess-saved" } });
+  const run = seatUp(fx, { env: { OPENRIG_RESUME_REF: "sess-asked" } });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.flag("--session"), "sess-asked");
+  assert.equal(run.value("RESUME_SOURCE"), "openrig-resume");
+  assert.match(run.value("RESUME_DECISION"), /resuming sess-asked \(asked by OpenRig\)/);
+});
+
+test("an OpenRig new-conversation signal starts fresh, without runner-state.json", () => {
+  for (const env of [{ OPENRIG_LAUNCH_ATTEMPT: "attempt-9" }, { OPENRIG_CONVERSATION: "conversation-9" }]) {
+    const fx = fixture({ runnerState: { sessionId: "sess-saved" } });
+    const run = seatUp(fx, { env });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.flag("--session"), undefined, JSON.stringify(env));
+    assert.equal(run.value("RESUME_SOURCE"), "openrig-fresh");
+    assert.match(run.value("RESUME_DECISION"), /OpenRig asked for a new conversation/);
+  }
+});
+
+test("--fresh works before and after the seat name, and DSH_SEAT_FRESH=1 works too", () => {
+  for (const run of [
+    seatUp(fixture({ runnerState: { sessionId: "sess-saved" } }), { env: { OPENRIG_SESSION_NAME: "" }, args: ["--fresh", SEAT] }),
+    seatUp(fixture({ runnerState: { sessionId: "sess-saved" } }), { env: { OPENRIG_SESSION_NAME: "" }, args: [SEAT, "--fresh"] }),
+    seatUp(fixture({ runnerState: { sessionId: "sess-saved" } }), { env: { DSH_SEAT_FRESH: "1" } }),
+  ]) {
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.flag("--session"), undefined);
+    assert.equal(run.flag("--session-name"), SEAT);
+    assert.equal(run.value("RESUME_SOURCE"), "asked-fresh");
+    assert.match(run.value("RESUME_DECISION"), /fresh \(asked with --fresh\)/);
+  }
+});
+
+test("--fresh plus OPENRIG_RESUME_REF is refused, naming both", () => {
+  const run = seatUp(fixture(), { env: { OPENRIG_RESUME_REF: "sess-asked" }, args: ["--fresh"] });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /--fresh/);
+  assert.match(run.stderr, /OPENRIG_RESUME_REF=sess-asked/);
+  assert.equal(run.argv.length, 0, "nothing would have run");
+});
+
+test("an invalid OPENRIG_RESUME_REF is refused, never falling back to runner-state.json", () => {
+  const fx = fixture({ runnerState: { sessionId: "sess-saved" } });
+  const run = seatUp(fx, { env: { OPENRIG_RESUME_REF: "bad; rm -rf /" } });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /not a valid session id/);
+  assert.equal(run.argv.length, 0);
+});
+
+test("an unknown --flag is refused with usage, not ignored", () => {
+  const run = seatUp(fixture(), { args: ["--bogus"] });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /unknown option '--bogus'/);
+  assert.match(run.stderr, /usage: seat-up\.sh/);
+});
+
+test("with no launch signal the saved runner-state.json still resumes; a fresh run leaves it byte-identical", () => {
+  const fx = fixture({ runnerState: { sessionId: "sess-saved", ready: true } });
+  const statePath = path.join(fx.seatDir, "runner-state.json");
+  const before = fs.readFileSync(statePath);
+
+  const plain = seatUp(fx);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.flag("--session"), "sess-saved");
+  assert.equal(plain.value("RESUME_SOURCE"), "runner-state");
+  assert.match(plain.value("RESUME_DECISION"), /from runner-state\.json/);
+
+  const fresh = seatUp(fx, { env: { DSH_SEAT_FRESH: "1" } });
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.equal(fresh.flag("--session"), undefined);
+  assert.deepEqual(fs.readFileSync(statePath), before, "a fresh start never rewrites runner-state.json");
+});
