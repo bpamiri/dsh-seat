@@ -240,9 +240,9 @@ test("activity: turnId is on accepted, tool, message, permission and stop posts"
   reporter.beginTurn("7");
   assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted"]);
   assert.equal(posts[0].turnId, "7");
-  assert.equal(reporter.working("PreToolUse", "read"), true);
+  assert.equal(reporter.toolCall("read"), true);
   t.mock.timers.tick(10_000);
-  assert.equal(reporter.working("active", "agent_message"), true);
+  assert.equal(reporter.messageChunk(), true);
   reporter.endTurn("end_turn");
   assert.deepEqual(kinds(posts), [
     "UserPromptSubmit/accepted", "PreToolUse/read", "active/agent_message", "Stop/end_turn",
@@ -256,17 +256,22 @@ test("activity: turnId is on accepted, tool, message, permission and stop posts"
   assert.equal(posts.at(-1).turnId, "8");
 });
 
-test("activity: working posts are throttled to one per 10 s per turn", (t) => {
+test("activity: every tool call posts unthrottled; only message chunks are throttled to one per 10 s", (t) => {
   t.mock.timers.enable({ apis: MOCK_APIS });
   const { posts, reporter } = activityFixture();
   reporter.beginTurn("1");
-  assert.equal(reporter.working("PreToolUse", "read"), true);
-  assert.equal(reporter.working("active", "agent_message"), false, "same instant is throttled");
+  assert.equal(reporter.messageChunk(), true, "the first chunk posts");
+  assert.equal(reporter.toolCall("read"), true, "a tool call posts even inside the chunk window");
+  assert.equal(reporter.messageChunk(), false, "a chunk in the same instant is throttled");
+  assert.equal(reporter.toolCall("execute"), true, "every further tool call still posts");
   t.mock.timers.tick(9_999);
-  assert.equal(reporter.working("active", "agent_message"), false, "still inside the window");
+  assert.equal(reporter.messageChunk(), false, "tool calls neither consume nor reset the chunk window");
   t.mock.timers.tick(1);
-  assert.equal(reporter.working("active", "agent_message"), true, "the window has passed");
-  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "PreToolUse/read", "active/agent_message"]);
+  assert.equal(reporter.messageChunk(), true, "the chunk window has passed");
+  assert.deepEqual(kinds(posts), [
+    "UserPromptSubmit/accepted", "active/agent_message", "PreToolUse/read",
+    "PreToolUse/execute", "active/agent_message",
+  ]);
 });
 
 test("activity: no working post while attention is held or after the turn ended", (t) => {
@@ -275,12 +280,12 @@ test("activity: no working post while attention is held or after the turn ended"
   reporter.beginTurn("1");
   reporter.permission();
   t.mock.timers.tick(60_000);
-  assert.equal(reporter.working("PreToolUse", "read"), false);
-  assert.equal(reporter.working("active", "agent_message"), false);
+  assert.equal(reporter.toolCall("read"), false);
+  assert.equal(reporter.messageChunk(), false);
   assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "Notification/permission_prompt"]);
   reporter.endTurn("cancelled");
   assert.equal(posts.some((post) => post.hookEvent === "Stop"), false, "no idle Stop while attention is held");
-  assert.equal(reporter.working("active", "agent_message"), false, "the turn is gone");
+  assert.equal(reporter.messageChunk(), false, "the turn is gone");
 });
 
 test("activity: idle beats run only while idle, and stop on accept, attention and exit", (t) => {
@@ -356,7 +361,7 @@ test("activity: a cancel-requested turn posts no idle until the prompt settles",
   assert.equal(posts.at(-1).subtype, "idle_heartbeat");
 });
 
-test("activity: the real runner posts accepted/tool/message/stop with one turnId (needs a loopback port; NOT EXECUTED)", async (t) => {
+test("activity: the real runner posts accepted/tool/message/stop with one turnId", async (t) => {
   // The only new test that opens a listening port: a loopback stand-in for the
   // activity endpoint. Per the operator CLEAR (19:58Z) nothing was executed.
   const posted = [];
