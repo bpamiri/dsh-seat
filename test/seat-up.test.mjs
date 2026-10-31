@@ -186,6 +186,17 @@ test("OPENRIG_RESUME_REF resumes exactly that ref and ignores runner-state.json"
   assert.match(run.value("RESUME_DECISION"), /resuming sess-asked \(asked by OpenRig\)/);
 });
 
+test("a real OpenRig resume (LAUNCH_ATTEMPT + RESUME_REF) resumes the requested ref, not the saved one", () => {
+  // Guards the rule order: a resume ref must beat the new-conversation signal.
+  // A community-harness resume sets both OPENRIG_LAUNCH_ATTEMPT and
+  // OPENRIG_RESUME_REF, and runner-state.json may hold a different id.
+  const fx = fixture({ runnerState: { sessionId: "sess-saved" } });
+  const run = seatUp(fx, { env: { OPENRIG_LAUNCH_ATTEMPT: "attempt-9", OPENRIG_RESUME_REF: "sess-asked" } });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.flag("--session"), "sess-asked");
+  assert.equal(run.value("RESUME_SOURCE"), "openrig-resume");
+});
+
 test("an OpenRig new-conversation signal starts fresh, without runner-state.json", () => {
   for (const env of [{ OPENRIG_LAUNCH_ATTEMPT: "attempt-9" }, { OPENRIG_CONVERSATION: "conversation-9" }]) {
     const fx = fixture({ runnerState: { sessionId: "sess-saved" } });
