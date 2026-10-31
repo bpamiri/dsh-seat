@@ -19,7 +19,9 @@ limits:
   - the declared model is matched to dsh's advertised model option by provider/model (provider exact or a substring, unique model id), a unique bare id, or an exact opaque selector; a value that cannot be mapped is reported in the pane and dsh's own default remains; it is applied on fresh launches and on resumes
   - a per-seat writable DSH_HOME is provisioned when unset (from the operator's acp profile, with session-log and plugin-inventory uploads off); an explicit DSH_HOME=$HOME/.dsh is refused; .credentials.yaml is never copied or linked
   - the agent child gets the baseline shell, OpenRig identity/routing variables, its own DSH_HOME, dsh's telemetry choice (DSH_TELEMETRY_DISABLED=1 unless the operator chose one), and the declared provider's key when set; the activity hook token and runner-only launch variables are not inherited
-  - activity is turn boundaries, permission notices and exits, not per-token or per-tool working posts
-  - idle liveness is one 30 s report at turn end, with no periodic heartbeat; a seat idle longer than about 60 s may read unknown
+  - activity reports real ACP events only: an accepted prompt, permission notices, tool calls (PreToolUse), message chunks (active), the turn's end and the agent's exit; every tool call posts, and message/thought chunks are throttled to at most one active post per 10 s per turn; every post for a turn carries its turnId
+  - a long silent step (a tool call or thinking with no output) still reads unknown after 15 s; event-driven posts cannot cover silence
+  - idle liveness is a Stop at turn end plus a Stop/idle_heartbeat every 60 s, both with livenessSeconds: 60; the heartbeat stops while a turn is open or attention is held
+  - carrying a turnId does not make OpenRig reject a stale event; that is the daemon-side work on OpenRig #43
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume reports dsh's "not resumable"/not-found refusal as missing, and any other failure as unconfirmed

@@ -15,8 +15,9 @@
 // The agent command defaults to `dsh --profile acp`.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
@@ -24,6 +25,12 @@ import { resolveModelChoice } from "../src/model.mjs";
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
 const PROTOCOL_VERSION = 1;
+// Message/thought chunks are throttled to one active post per 10 s per turn
+// (OpenRig reads working stale after 15 s); every tool call posts unthrottled.
+// The idle heartbeat is the contract's 60 s Stop/idle_heartbeat.
+const CHUNK_POST_THROTTLE_MS = 10_000;
+const IDLE_HEARTBEAT_MS = 60_000;
+const IDLE_LIVENESS_SECONDS = 60;
 const OPENRIG = {
   url: env("OPENRIG_URL"),
   port: env("OPENRIG_PORT"),
@@ -97,6 +104,7 @@ function recordMissing() {
 // awaited by the agent/turn path. A refused or failed post records nothing.
 let sequence = 0;
 let postChain = Promise.resolve();
+let pendingPosts = 0;
 let endpoint = null;
 function resolveEndpoint() {
   if (OPENRIG.url) return { base: OPENRIG.url.replace(/\/$/, ""), token: OPENRIG.token };
@@ -124,6 +132,7 @@ function post(hookEvent, subtype, extra = {}) {
     subtype,
     ...extra,
   };
+  pendingPosts++;
   postChain = postChain.then(async () => {
     try {
       await fetch(`${endpoint.base}/api/activity/hooks`, {
@@ -133,6 +142,7 @@ function post(hookEvent, subtype, extra = {}) {
         signal: AbortSignal.timeout(1500),
       });
     } catch { /* never hold the runner on a post */ }
+    finally { pendingPosts--; }
   });
   return postChain;
 }
@@ -144,6 +154,108 @@ async function drainPosts(ms = 2000) {
   ]);
   clearTimeout(timer);
 }
+
+// ── activity reporting: turn, attention, working posts, idle heartbeat ──────
+// Exported for the contract tests, which drive it in-process with fake timers
+// and an injected post sink (no port, no sleeping). The runner uses one
+// instance; `post` is the queue above, `enabled` says an endpoint exists.
+export function createActivityReporter({
+  post,
+  now = () => Date.now(),
+  hasPendingPost = () => false,
+  enabled = () => true,
+  throttleMs = CHUNK_POST_THROTTLE_MS,
+  beatMs = IDLE_HEARTBEAT_MS,
+  livenessSeconds = IDLE_LIVENESS_SECONDS,
+}) {
+  let turn = null;          // { turnId, cancelSent, lastChunkPostAt }
+  let attention = false;
+  let beatTimer = null;
+  let dead = false;         // the agent exited or the runner is shutting down
+
+  function stopBeat() {
+    if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
+  }
+  function startBeat() {
+    if (beatTimer || dead || turn || attention || !enabled()) return;
+    beatTimer = setInterval(() => {
+      // A turn, attention, an exit or a shutdown retires the beat; a post still
+      // in flight makes this beat skip rather than queue behind it.
+      if (dead || turn || attention) { stopBeat(); return; }
+      if (hasPendingPost()) return;
+      post("Stop", "idle_heartbeat", { livenessSeconds });
+    }, beatMs);
+    beatTimer.unref?.();
+  }
+
+  return {
+    get turn() { return turn; },
+    get attentionHeld() { return attention; },
+    get beatArmed() { return beatTimer !== null; },
+    get beatHandle() { return beatTimer; },
+    beginTurn(turnId) {
+      stopBeat();
+      attention = false;
+      turn = { turnId, cancelSent: false, lastChunkPostAt: -Infinity };
+      post("UserPromptSubmit", "accepted", { turnId });
+      return turn;
+    },
+    // Every real tool call is working evidence and posts unthrottled: a tool
+    // call is rare and meaningful, and it must never be dropped behind a
+    // chunk's window (nor consume or reset that window). Still only for an
+    // open turn, with no attention held and no exit/shutdown.
+    toolCall(toolKind) {
+      if (!turn || attention || dead) return false;
+      post("PreToolUse", toolKind, { turnId: turn.turnId });
+      return true;
+    },
+    // Message and thought chunks are frequent: at most one active post per
+    // throttleMs per turn so a burst of chunks cannot flood the endpoint. An
+    // exit or shutdown also suppresses it: shutdown() leaves the turn open, so
+    // a chunk already buffered then must not post.
+    messageChunk() {
+      if (!turn || attention || dead) return false;
+      const at = now();
+      if (at - turn.lastChunkPostAt < throttleMs) return false;
+      turn.lastChunkPostAt = at;
+      post("active", "agent_message", { turnId: turn.turnId });
+      return true;
+    },
+    permission() {
+      attention = true;
+      stopBeat();
+      post("Notification", "permission_prompt", turn ? { turnId: turn.turnId } : {});
+    },
+    // The turn ended on the agent's own stop reason (end_turn, cancelled, …).
+    // Never a Stop while attention is held: OpenRig reads any non-exit Stop as
+    // idle and would clear needs-input.
+    endTurn(stopReason) {
+      if (!turn) return null;
+      const ended = turn;
+      turn = null;
+      if (!attention) post("Stop", stopReason, { turnId: ended.turnId, livenessSeconds });
+      return ended;
+    },
+    // The prompt failed before giving a stop reason: no Stop, the runtime_error
+    // notice carries the turn instead.
+    abandonTurn() {
+      const ended = turn;
+      turn = null;
+      return ended;
+    },
+    idle() { startBeat(); },
+    agentExited() { dead = true; stopBeat(); },
+    shutdown() { dead = true; stopBeat(); },
+  };
+}
+
+// One reporter for the runner's lifetime. `endpoint`/`pendingPosts` are the
+// post queue's; `enabled()` keeps the beat off when no endpoint is configured.
+const activity = createActivityReporter({
+  post,
+  hasPendingPost: () => pendingPosts > 0,
+  enabled: () => Boolean(endpoint?.token),
+});
 
 // ── ACP client ──────────────────────────────────────────────────────────────
 let child = null;
@@ -212,6 +324,8 @@ function startAgent(dshHome) {
       entry.reject(new AcpError(`agent exited (code=${code} signal=${signal})`, { method: entry.method }));
     }
     pending.clear();
+    // No idle heartbeat once the agent is gone; the exit Stop below is final.
+    activity.agentExited();
     if (!shuttingDown) {
       warn(`agent exited (code=${code} signal=${signal})`);
       post("Stop", `${presetName}_exited`);
@@ -259,8 +373,7 @@ function handleAgentRequest(msg) {
     const tool = msg.params?.toolCall ?? {};
     const title = tool.title ?? tool.toolCallId ?? "a tool";
     line(`[permission] ${title} — refused (first-version runner)`);
-    attentionHeld = true;
-    post("Notification", "permission_prompt");
+    activity.permission();
     send({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "cancelled" } } });
     return;
   }
@@ -274,12 +387,22 @@ function handleAgentNotification(msg) {
   if (kind === "agent_message_chunk") {
     const content = update.content;
     if (content?.type === "text" && typeof content.text === "string") pane(content.text);
+    // A real message chunk is working evidence; the reporter throttles it and
+    // suppresses it while attention is held. Pane output is untouched.
+    activity.messageChunk();
   } else if (kind === "agent_thought_chunk") {
     const content = update.content;
     if (content?.type === "text" && typeof content.text === "string") pane(content.text);
+    activity.messageChunk();
   } else if (kind === "tool_call" || kind === "tool_call_update") {
     const title = update.title ?? update.toolCallId ?? update.kind;
     if (title) line(`[tool] ${title}${update.status ? ` — ${update.status}` : ""}`);
+    // Only the initial tool_call is a working post; tool_call_update is status
+    // noise and stays pane-only (contract §4: PreToolUse/<tool kind>).
+    if (kind === "tool_call") {
+      const toolKind = typeof update.kind === "string" && update.kind ? update.kind : "tool";
+      activity.toolCall(toolKind);
+    }
   }
 }
 
@@ -290,9 +413,9 @@ function handleAgentNotification(msg) {
 let block = "";
 let pasteBuffer = null;
 let escapeBuffer = "";
-let attentionHeld = false;
+// The open turn and permission attention live in `activity` (above): the
+// reporter owns the turnId, the working-post throttle and the idle beat.
 let promptQueued = false;
-let currentTurn = null;
 let turnCount = 0;
 const queue = [];
 
@@ -335,17 +458,18 @@ function submitBlock() {
   if (value === "/abort") { cancelTurn(); return; }
   if (!sessionId) { warn("no conversation is open yet — the prompt was not sent"); return; }
   queue.push(value);
-  if (queue.length > 1 || currentTurn) {
-    line(`[queued: ${queue.length}${currentTurn ? " · 1 running" : ""}]`);
+  if (queue.length > 1 || activity.turn) {
+    line(`[queued: ${queue.length}${activity.turn ? " · 1 running" : ""}]`);
   } else {
     void pump();
   }
 }
 
 function cancelTurn() {
-  if (!sessionId || !currentTurn) { line("[dsh-seat] cancel requested (no turn in flight)"); return; }
-  if (currentTurn.cancelSent) return;
-  currentTurn.cancelSent = true;
+  const turn = activity.turn;
+  if (!sessionId || !turn) { line("[dsh-seat] cancel requested (no turn in flight)"); return; }
+  if (turn.cancelSent) return;
+  turn.cancelSent = true;
   send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
   line("[dsh-seat] cancel requested");
 }
@@ -355,25 +479,25 @@ async function pump() {
   const text = queue.shift();
   if (text === undefined) return;
   promptQueued = true;
-  attentionHeld = false;
-  const turn = { cancelSent: false };
-  currentTurn = turn;
-  const turnId = String(++turnCount);
-  post("UserPromptSubmit", "accepted", { turnId });
+  const turn = activity.beginTurn(String(++turnCount));
   line(`you ▸ ${text.split("\n")[0].slice(0, 160)}${text.includes("\n") ? " …" : ""}`);
   try {
     const result = await request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
     const stopReason = typeof result?.stopReason === "string" ? result.stopReason : "end_turn";
-    if (!attentionHeld) post("Stop", stopReason, { livenessSeconds: 30 });
+    // Only the agent's own reply ends the turn. A cancel request does not: the
+    // turn stays open (and the beat stays off) until this prompt settles.
+    activity.endTurn(stopReason);
   } catch (error) {
     if (!childExited && !shuttingDown) {
       warn(`prompt failed: ${error.message}`);
-      post("Notification", "runtime_error");
+      post("Notification", "runtime_error", turn ? { turnId: turn.turnId } : {});
     }
+    activity.abandonTurn();
   } finally {
     promptQueued = false;
-    currentTurn = null;
-    if (!shuttingDown) void pump();
+    // The next queued prompt arms a new turn (which stops the beat); an empty
+    // queue lets the idle heartbeat start now that the turn has settled.
+    if (!shuttingDown) { void pump(); activity.idle(); }
   }
 }
 
@@ -487,6 +611,7 @@ function killAgent(signal) {
 async function stop(code, why) {
   if (shuttingDown) return;
   shuttingDown = true;
+  activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);
   killAgent("SIGTERM");
@@ -540,6 +665,9 @@ async function main() {
   try {
     await openConversation();
     line(`[dsh-seat] ${presetName} ready · ACP ${PROTOCOL_VERSION}`);
+    // The seat is idle until the first prompt: start the 60 s heartbeat. A
+    // first prompt (or a queued one) immediately starts a turn and stops it.
+    activity.idle();
     enqueueFirstInput();
   } catch (error) {
     if (!shuttingDown) {
@@ -549,4 +677,17 @@ async function main() {
   }
 }
 
-void main();
+// True only when this file is the process entrypoint. Both sides go through
+// realpath: a symlinked install (`npm link` puts a symlink on PATH) or a
+// /tmp -> /private/tmp alias resolves to the same file as import.meta.url,
+// while importing the file for its exports must still not run main().
+export function isEntrypoint(argv1, moduleUrl) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint(process.argv[1], import.meta.url)) void main();
