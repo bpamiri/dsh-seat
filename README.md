@@ -15,7 +15,7 @@ Apache-2.0.
 | Contract area | This runner |
 |---|---|
 | **Identity** | Writes the launch record to `OPENRIG_LAUNCH_RESULT` after `session/new` (or a successful resume), with `format: 1`, the attempt, the preset name, the agent's `nativeRef`, and a `producer` naming the runner, dsh and ACP versions (`dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1`). A failed handshake writes no conversation. |
-| **Activity** | `UserPromptSubmit/accepted` with a `turnId`; `Stop/<stopReason>` with `livenessSeconds: 30`; `Notification/permission_prompt`; `Notification/runtime_error`; `Stop/dsh_exited` on agent exit. Posts are queued in order and never block the agent. |
+| **Activity** | `UserPromptSubmit/accepted`; working posts from real ACP activity — `PreToolUse/<tool kind>` on a `tool_call`, `active/agent_message` on a message or thought chunk — throttled to at most one per 10 s per turn; `Notification/permission_prompt`; `Notification/runtime_error`; the turn's `Stop/<stopReason>` and a 60 s `Stop/idle_heartbeat`, both with `livenessSeconds: 60`; `Stop/dsh_exited` on agent exit. Every post made for a turn carries its `turnId`. Posts are queued in order and never block the agent. |
 | **Input** | Raw mode + bracketed paste. One submitted block — newlines included — becomes exactly one `session/prompt`, byte for byte. A block sent mid-turn queues for the next turn. |
 | **Control** | A block that is exactly `/abort`, or Ctrl-C outside a paste, sends ACP `session/cancel`. `Stop/cancelled` is posted only when the agent itself returns `stopReason: "cancelled"`. |
 | **Permissions** | Every `session/request_permission` is refused at once with `{"outcome":{"outcome":"cancelled"}}`, the requested tool title is shown in the pane, `Notification/permission_prompt` is posted, and the attention is held until the next accepted prompt. Unknown agent requests get JSON-RPC `-32601`. |
@@ -87,10 +87,17 @@ limits: ...   # see preset/dsh.yaml
 - Reopening uses `session/resume`; tested with dsh 0.2.1-rc.2, which advertises
   `sessionCapabilities.resume` and no `loadSession` (`session/load` returns `-32601`). The
   `session/load` fallback is for other ACP agents only.
-- Activity reports turn boundaries, permission notices and exits, not per-token or per-tool
-  working posts.
-- Idle liveness is one 30 s report at turn end, with no periodic heartbeat; a seat idle longer
-  than about 60 s may read unknown.
+- Activity reports real ACP events: an accepted prompt, permission notices, tool calls, message
+  chunks, the turn's end and the agent's exit. Working posts (tool calls and message chunks) are
+  throttled to at most one per 10 s per turn, and every post for a turn carries its `turnId`.
+- A long silent step — a tool call or thinking with no output — still reads unknown after 15 s;
+  event-driven posts cannot cover silence.
+- Idle liveness is a `Stop` at turn end plus a `Stop/idle_heartbeat` every 60 s, both with
+  `livenessSeconds: 60`. The heartbeat runs only while no turn is open, no attention is held, the
+  agent is alive and the runner is not shutting down; it stops on a new accepted prompt, on
+  attention, on child exit and on shutdown.
+- Carrying a `turnId` does not make OpenRig reject a stale event; that is the daemon-side work on
+  OpenRig #43.
 - Stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup.
 - Resume uses ACP `session/resume`; a dsh "not resumable" or not-found refusal is reported as
   missing, any other failure is left unconfirmed. A changed declared model is applied on resume.

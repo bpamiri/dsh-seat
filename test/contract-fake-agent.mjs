@@ -39,7 +39,17 @@ createInterface({ input: process.stdin }).on("line", (raw) => {
       break;
     case "session/load": fail(msg.id, -32601, "Method not found: session/load"); break;
     case "session/set_config_option": reply(msg.id, {}); break;
-    case "session/prompt": reply(msg.id, { stopReason: "end_turn" }); break;
+    case "session/prompt":
+      if (mode === "activity") {
+        // One tool call and two message chunks (the runner's 10 s throttle must
+        // collapse the second chunk); then the agent's own end_turn.
+        const sessionId = "fake-new";
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } } });
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "call-1", kind: "read", title: "Read file", status: "pending" } } });
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "again" } } } });
+      }
+      reply(msg.id, { stopReason: "end_turn" });
+      break;
     case "session/cancel": break;
     default: if (msg.id !== undefined) fail(msg.id, -32601, `Method not found: ${msg.method}`);
   }
