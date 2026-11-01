@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const log = arg("--log");
 const envLog = arg("--env-log");
+const marker = arg("--marker");
 const mode = arg("--mode") ?? "fresh";
 const MODEL_OPTIONS = [{
   id: "model", name: "Model", type: "select",
@@ -22,6 +23,8 @@ const MODEL_OPTIONS = [{
 }];
 const record = (entry) => log && appendFileSync(log, `${JSON.stringify(entry)}\n`);
 if (envLog) writeFileSync(envLog, JSON.stringify(process.env));
+// A start marker proves the runner never spawned the agent (--require-resume).
+if (marker) writeFileSync(marker, "started");
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
 const fail = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });

@@ -54,6 +54,17 @@ const argValue = (name, fallback = null) => {
 };
 const agentCommand = argValue("--agent-command", "dsh --profile acp");
 const presetName = argValue("--name", OPENRIG.runtime);
+const requireResumeFlag = argv.includes("--require-resume");
+
+// DSH_SEAT_REQUIRE_RESUME is strict: exactly "1" turns it on, unset/empty/"0"
+// leaves it off, and any other value is a configuration error (never guessed).
+function requireResumeSetting() {
+  const raw = process.env.DSH_SEAT_REQUIRE_RESUME;
+  if (raw !== undefined && raw !== "" && raw !== "0" && raw !== "1") return { error: raw };
+  if (requireResumeFlag) return { on: true, how: "--require-resume" };
+  if (raw === "1") return { on: true, how: "DSH_SEAT_REQUIRE_RESUME=1" };
+  return { on: false };
+}
 
 function env(name) {
   const value = process.env[name];
@@ -514,8 +525,10 @@ async function openConversation() {
     throw new Error(`the agent speaks ACP ${init?.protocolVersion ?? "unknown"}; this runner needs ACP ${PROTOCOL_VERSION}`);
   }
   if (OPENRIG.resumeRef) {
+    line(`[dsh-seat] resuming ${OPENRIG.resumeRef} (asked by OpenRig)`);
     await reopen(OPENRIG.resumeRef);
   } else {
+    line("[dsh-seat] new conversation (OpenRig passed no resume ref)");
     const result = await request("session/new", { cwd: process.cwd(), mcpServers: [] }, { timeoutMs: 30000 });
     sessionId = typeof result?.sessionId === "string" ? result.sessionId : "";
     if (!sessionId) throw new Error("session/new returned no session id");
@@ -626,6 +639,21 @@ async function stop(code, why) {
 }
 
 async function main() {
+  // The resume requirement is a launch-time guard: refuse before any agent is
+  // spawned, so a managed launch that must resume can never create a new
+  // conversation. A fresh launch has no ref by design, so the flag is opt-in.
+  const requireResume = requireResumeSetting();
+  if (requireResume.error !== undefined) {
+    line(`[dsh-seat] refusing to start: DSH_SEAT_REQUIRE_RESUME must be exactly 1 (on) or 0/empty (off), got ${JSON.stringify(requireResume.error)}; no conversation was created`);
+    process.exitCode = 1;
+    return;
+  }
+  if (requireResume.on && !OPENRIG.resumeRef) {
+    line(`[dsh-seat] refusing to start: ${requireResume.how} is set but OpenRig passed no resume ref; no conversation was created`);
+    writeLaunch({ format: 1, attempt: OPENRIG.attempt, harness: presetName, error: "resume_required", producer: producer() });
+    process.exitCode = 1;
+    return;
+  }
   const prepared = prepareDshHome(process.env);
   if (!prepared.ok) {
     warn(prepared.error);
