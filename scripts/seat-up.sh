@@ -7,8 +7,11 @@
 # What it does that a bare `node src/dsh-seat.mjs` doesn't:
 #   - runs the runner (and dsh) on a pinned Node, by absolute path;
 #   - pins JAVA_HOME by absolute path when the seat's work needs a specific JDK;
-#   - resumes the seat's last dsh session from its runner-state.json, so a
-#     relaunch continues the conversation instead of starting a new one;
+#   - picks the conversation the launch asked for: OPENRIG_RESUME_REF resumes
+#     that exact ref, an OpenRig new-conversation signal (OPENRIG_LAUNCH_ATTEMPT
+#     or OPENRIG_CONVERSATION) passes no --session, --fresh/DSH_SEAT_FRESH=1
+#     passes none, and only a launch with no signal falls back to
+#     runner-state.json (a relaunch then continues the saved conversation);
 #   - uses the seat's own DSH_HOME, built on first use (scripts/make-seat-home.sh);
 #   - gives the seat a private TMPDIR (0700, owned by you), which dsh's
 #     workspace-write sandbox already lets it write;
@@ -16,6 +19,8 @@
 #   - sends an initial prompt so the agent orients itself with `rig whoami`.
 #
 # The seat:   $OPENRIG_SESSION_NAME (set by a managed launch), else the first argument.
+# Options:    --fresh (before or after the seat name) starts a new conversation;
+#             an unknown -- argument is refused, never ignored.
 # Its files:  $OPENRIG_HOME/state/dsh/<seat>/   (runner-state.json, home/, seat.env)
 #
 # Settings come from DSH_SEAT_<KEY> in the environment, else from <seat>/seat.env:
@@ -47,7 +52,25 @@ die() {
   exit 1
 }
 
-SESSION="${OPENRIG_SESSION_NAME:-${1:-}}"
+# ── Arguments ───────────────────────────────────────────────────────────────
+# --fresh starts a new conversation and may sit before or after the seat name;
+# every other -- argument is a usage error rather than something to ignore.
+FRESH_REQUESTED=0
+if [ "${DSH_SEAT_FRESH:-}" = 1 ]; then FRESH_REQUESTED=1; fi
+SEAT_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --fresh) FRESH_REQUESTED=1 ;;
+    -*) die "unknown option '$arg'; usage: seat-up.sh [--fresh] [<member>@<rig>]" ;;
+    *)
+      [ -z "$SEAT_ARG" ] \
+        || die "unexpected extra argument '$arg'; usage: seat-up.sh [--fresh] [<member>@<rig>]"
+      SEAT_ARG="$arg"
+      ;;
+  esac
+done
+
+SESSION="${OPENRIG_SESSION_NAME:-$SEAT_ARG}"
 [ -n "$SESSION" ] || die "no seat name: run under a managed launch (OPENRIG_SESSION_NAME) or pass <member>@<rig>"
 
 OPENRIG_HOME_DIR="${OPENRIG_HOME:-$HOME/.openrig}"
@@ -154,13 +177,55 @@ for name in $EXTRA_KEYS; do
   add_pass "$name"
 done
 
-# ── Resume ──────────────────────────────────────────────────────────────────
-SESSION_ID="$("$NODE" -e '
-  try {
-    const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-    if (typeof s.sessionId === "string" && /^[A-Za-z0-9._:-]+$/.test(s.sessionId)) process.stdout.write(s.sessionId);
-  } catch {}
-' "$SEAT_DIR/runner-state.json")"
+# ── Session decision ────────────────────────────────────────────────────────
+# Follow what the launch asked for before any heuristic:
+#   1 explicit --fresh + OPENRIG_RESUME_REF is a contradiction and is refused;
+#   2 OPENRIG_RESUME_REF resumes exactly that ref (never runner-state.json);
+#   3 an OpenRig new-conversation signal passes no --session;
+#   4 --fresh / DSH_SEAT_FRESH=1 passes no --session;
+#   5 otherwise the saved runner-state.json id, else fresh.
+RESUME_REF="${OPENRIG_RESUME_REF:-}"
+ASKED_NEW=0
+if [ -n "${OPENRIG_LAUNCH_ATTEMPT:-}" ] || [ -n "${OPENRIG_CONVERSATION:-}" ]; then ASKED_NEW=1; fi
+
+if [ "$FRESH_REQUESTED" = 1 ] && [ -n "$RESUME_REF" ]; then
+  die "conflicting launch request: --fresh (or DSH_SEAT_FRESH=1) asks for a new conversation, but OPENRIG_RESUME_REF=$RESUME_REF asks to resume one. Refusing to pick one silently."
+fi
+
+SESSION_ID=""
+RESUME_SOURCE=""
+case "$RESUME_REF" in
+  "") ;;
+  *[!A-Za-z0-9._:-]*) die "OPENRIG_RESUME_REF '$RESUME_REF' is not a valid session id (allowed: letters, digits, . _ : -); refusing to fall back to runner-state.json" ;;
+esac
+if [ -n "$RESUME_REF" ]; then
+  SESSION_ID="$RESUME_REF"
+  RESUME_SOURCE=openrig-resume
+elif [ "$ASKED_NEW" = 1 ]; then
+  RESUME_SOURCE=openrig-fresh
+elif [ "$FRESH_REQUESTED" = 1 ]; then
+  RESUME_SOURCE=asked-fresh
+else
+  SAVED_SESSION_ID="$("$NODE" -e '
+    try {
+      const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      if (typeof s.sessionId === "string" && /^[A-Za-z0-9._:-]+$/.test(s.sessionId)) process.stdout.write(s.sessionId);
+    } catch {}
+  ' "$SEAT_DIR/runner-state.json")"
+  if [ -n "$SAVED_SESSION_ID" ]; then
+    SESSION_ID="$SAVED_SESSION_ID"
+    RESUME_SOURCE=runner-state
+  else
+    RESUME_SOURCE=none
+  fi
+fi
+case "$RESUME_SOURCE" in
+  openrig-resume) RESUME_LABEL="resuming $SESSION_ID (asked by OpenRig)" ;;
+  openrig-fresh) RESUME_LABEL="fresh (OpenRig asked for a new conversation; runner-state.json not used)" ;;
+  asked-fresh) RESUME_LABEL="fresh (asked with --fresh)" ;;
+  runner-state) RESUME_LABEL="resuming $SESSION_ID from runner-state.json" ;;
+  *) RESUME_LABEL="fresh (no saved session)" ;;
+esac
 
 # ── The runner ──────────────────────────────────────────────────────────────
 DEFAULT_PROMPT="You are running as the OpenRig seat $SESSION. Run \`rig whoami --json\` to learn your rig, peers and how to reach them, then check \`rig queue\` for work addressed to you before doing anything else."
@@ -188,10 +253,12 @@ if [ -n "${DSH_SEAT_DRY_RUN:-}" ]; then
   echo "PATH=$PATH"
   echo "JAVA_HOME=${JAVA_HOME:-}"
   echo "TMPDIR=$TMPDIR"
+  echo "RESUME_SOURCE=$RESUME_SOURCE"
+  echo "RESUME_DECISION=$RESUME_LABEL"
   for name in $PASS_NAMES; do echo "PASS $name=$(printenv "$name")"; done
   for arg in "$@"; do echo "ARG $arg"; done
   exit 0
 fi
 
-echo "seat-up: $SESSION · node $FOUND_MAJOR · ${SESSION_ID:+resuming $SESSION_ID · }tmp $SEAT_TMP"
+echo "seat-up: $SESSION · node $FOUND_MAJOR · $RESUME_LABEL · tmp $SEAT_TMP"
 exec "$NODE" "$@"
