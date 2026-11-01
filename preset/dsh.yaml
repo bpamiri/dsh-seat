@@ -16,6 +16,7 @@ limits:
   - fork is unsupported
   - guidance, skills and startup files are not placed by OpenRig for community harnesses and are not projected by this runner
   - reopening uses ACP session/resume; tested with dsh 0.2.1-rc.2, which advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); the session/load fallback is for other ACP agents
+  - the pane states whether the runner resumed (resuming <ref> (asked by OpenRig)) or started a new conversation (OpenRig passed no resume ref); --require-resume or DSH_SEAT_REQUIRE_RESUME=1 refuses a launch with no resume ref, spawning nothing and recording error: resume_required
   - the declared model is matched to dsh's advertised model option by provider/model (provider exact or a substring, unique model id), a unique bare id, or an exact opaque selector; a value that cannot be mapped is reported in the pane and dsh's own default remains; it is applied on fresh launches and on resumes
   - a per-seat writable DSH_HOME is provisioned when unset (from the operator's acp profile, with session-log and plugin-inventory uploads off); an explicit DSH_HOME=$HOME/.dsh is refused; .credentials.yaml is never copied or linked
   - the agent child gets the baseline shell, OpenRig identity/routing variables, its own DSH_HOME, dsh's telemetry choice (DSH_TELEMETRY_DISABLED=1 unless the operator chose one), and the declared provider's key when set; the activity hook token and runner-only launch variables are not inherited

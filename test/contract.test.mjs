@@ -90,14 +90,15 @@ test("agent env: identity/routing + telemetry off + DSH_HOME + provider key, nev
 
 function start(t, {
   mode = "fresh", model = null, resume = null, extraEnv = {}, dshHome = "explicit", home = process.env.HOME,
-  openrigHome = null,
+  openrigHome = null, args = [],
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dsh-seat-contract-"));
   const log = join(dir, "agent.jsonl");
   const envLog = join(dir, "agent-env.json");
+  const started = join(dir, "agent-started");
   const record = join(dir, "launch", "record.json");
   const resolvedDshHome = dshHome === "explicit" ? join(dir, "dsh-home") : dshHome;
-  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --env-log ${envLog} --mode ${mode}`], {
+  const child = spawn(process.execPath, [bin, ...args, "--agent-command", `${process.execPath} ${fake} --log ${log} --env-log ${envLog} --marker ${started} --mode ${mode}`], {
     env: {
       PATH: process.env.PATH, HOME: home,
       ...(resolvedDshHome ? { DSH_HOME: resolvedDshHome } : {}),
@@ -114,7 +115,7 @@ function start(t, {
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stdout += chunk; });
   t.after(() => { try { child.kill("SIGKILL"); } catch {} rmSync(dir, { recursive: true, force: true }); });
-  return { child, dir, log, envLog, record, stdout: () => stdout };
+  return { child, dir, log, envLog, started, record, stdout: () => stdout };
 }
 
 async function waitFor(read, ms = 10000) {
@@ -137,6 +138,8 @@ test("fresh launch: record after session/new and the declared model applied", as
     format: 1, attempt: "attempt-1", harness: "dsh", nativeRef: "fake-new",
     producer: "dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1",
   });
+  assert.match(run.stdout(), /\[dsh-seat\] new conversation \(OpenRig passed no resume ref\)/);
+  assert.ok(lines(run.log).some((m) => m.method === "session/new"), "a fresh launch still calls session/new");
   const config = await waitFor(() => lines(run.log).find((m) => m.method === "session/set_config_option"));
   assert.equal(config.params.configId, "model");
   assert.equal(config.params.value, "[\"deepseek-official\",\"deepseek-v4-flash\"]");
@@ -167,6 +170,7 @@ test("resume: same ref recorded, no session/new, and a changed model applied fro
     format: 1, attempt: "attempt-1", harness: "dsh", nativeRef: "fake-old",
     producer: "dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1",
   });
+  assert.match(run.stdout(), /\[dsh-seat\] resuming fake-old \(asked by OpenRig\)/);
   assert.equal(lines(run.log).some((m) => m.method === "session/new"), false);
   const config = await waitFor(() => lines(run.log).find((m) => m.method === "session/set_config_option"));
   assert.equal(config.params.value, "[\"deepseek-official\",\"deepseek-v4-pro\"]");
@@ -179,6 +183,48 @@ test("resume missing: records error missing and starts no conversation", async (
     format: 1, attempt: "attempt-1", harness: "dsh", error: "missing",
     producer: "dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1",
   });
+  assert.equal(lines(run.log).some((m) => m.method === "session/new"), false);
+});
+
+test("--require-resume with no ref refuses before spawning the agent and records resume_required", async (t) => {
+  const run = start(t, { args: ["--require-resume"] });
+  await waitFor(() => run.child.exitCode !== null);
+  assert.equal(run.child.exitCode, 1);
+  assert.match(run.stdout(), /refusing to start: --require-resume is set but OpenRig passed no resume ref/);
+  assert.equal(existsSync(run.started), false, "the agent must never be spawned");
+  assert.equal(existsSync(run.log), false, "no session/new could have been sent");
+  assert.deepEqual(json(run.record), {
+    format: 1, attempt: "attempt-1", harness: "dsh", error: "resume_required",
+    producer: "dsh-seat 0.3.0; dsh 0.2.1-rc.2; ACP 1",
+  });
+});
+
+test("DSH_SEAT_REQUIRE_RESUME=1 with no ref refuses the same way, naming the env", async (t) => {
+  const run = start(t, { extraEnv: { DSH_SEAT_REQUIRE_RESUME: "1" } });
+  await waitFor(() => run.child.exitCode !== null);
+  assert.equal(run.child.exitCode, 1);
+  assert.match(run.stdout(), /DSH_SEAT_REQUIRE_RESUME=1 is set but OpenRig passed no resume ref/);
+  assert.equal(existsSync(run.started), false);
+  assert.equal(json(run.record).error, "resume_required");
+});
+
+test("DSH_SEAT_REQUIRE_RESUME=yes is refused, naming the value, and nothing starts", async (t) => {
+  const run = start(t, { extraEnv: { DSH_SEAT_REQUIRE_RESUME: "yes" } });
+  await waitFor(() => run.child.exitCode !== null);
+  assert.equal(run.child.exitCode, 1);
+  assert.match(run.stdout(), /DSH_SEAT_REQUIRE_RESUME must be exactly 1/);
+  assert.match(run.stdout(), /"yes"/);
+  assert.equal(existsSync(run.started), false, "the agent must never be spawned");
+  assert.equal(existsSync(run.record), false, "a configuration error writes no launch record");
+});
+
+test("--require-resume with a ref resumes that conversation normally", async (t) => {
+  const run = start(t, { mode: "resume", resume: "fake-old", args: ["--require-resume"] });
+  const record = await waitFor(() => json(run.record));
+  assert.ok(record, `no record; pane: ${run.stdout()}`);
+  assert.equal(record.nativeRef, "fake-old");
+  assert.match(run.stdout(), /\[dsh-seat\] resuming fake-old \(asked by OpenRig\)/);
+  assert.ok(lines(run.log).some((m) => m.method === "session/resume"));
   assert.equal(lines(run.log).some((m) => m.method === "session/new"), false);
 });
 
