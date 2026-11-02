@@ -1,0 +1,37 @@
+{
+  "capture": "a",
+  "build": "dsh-seat f029719cc0e2a8e79196edd041e4d7ea7adb9ab8 (pre-beat main)",
+  "fakeTurnSilenceMs": 60000,
+  "runAt": "2026-11-02",
+  "note": "No working beat: the only working post is the accepted prompt; nothing until Stop.",
+  "posts": [
+    {
+      "offsetMs": 0.0,
+      "receivedDelayMs": 34.0,
+      "hookEvent": "UserPromptSubmit",
+      "subtype": "accepted",
+      "turnId": "1",
+      "sequence": 1,
+      "livenessSeconds": null
+    },
+    {
+      "offsetMs": 60005.0,
+      "receivedDelayMs": 6.0,
+      "hookEvent": "Stop",
+      "subtype": "end_turn",
+      "turnId": null,
+      "sequence": 2,
+      "livenessSeconds": 30
+    }
+  ],
+  "agent": [
+    {
+      "event": "prompt-start",
+      "offsetMs": 1.0
+    },
+    {
+      "event": "prompt-end",
+      "offsetMs": 60004.0
+    }
+  ]
+}

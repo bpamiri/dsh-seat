@@ -1,0 +1,5 @@
+#!/bin/sh
+# Working-beat runner: dsh-seat PR #9 head 454aab3c.
+set -eu
+exec "<PATH_TO_DSH_SEAT_BEAT>/bin/dsh-seat" \
+  --agent-command "/usr/bin/env node <PATH_TO_FAKE_AGENT> --log <PATH_TO_LOG> --silence 60000"

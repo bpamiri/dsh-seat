@@ -58,6 +58,9 @@ the old checker's case 4 fails by design because it asserts refuse-by-default. T
 agent stands in for dsh and scripts the ask/permit routes; a real person answering, and a real
 0.7.8/0.7.9 daemon, were not available here.
 
+A sanitized liveness reproduction (pre-beat vs working-beat post timelines and a local harness) lives in
+[`liveness-repro/`](liveness-repro/README.md).
+
 ## Real dsh check (outside the checker)
 
 Against `dsh 0.2.1-rc.2`, `acp` profile, no model turn:
