@@ -181,8 +181,8 @@
       ]
     },
     {
-      "id": "4",
-      "title": "Permissions: refused at once, shown, and held as needs input",
+      "id": "3b",
+      "title": "Working beat (optional): beats name their open turn, keep order, and stop at its end and while a person is asked",
       "status": "pass",
       "checks": [
         {
@@ -190,38 +190,505 @@
           "ok": true
         },
         {
-          "name": "the agent's permission request is sent",
+          "name": "each beat names the turn it belongs to",
           "ok": true
         },
         {
-          "name": "the request is answered, not left pending",
+          "name": "sequence rises with the runner's own time across every post, beats included",
           "ok": true
         },
         {
-          "name": "it's answered at once (within 2 s)",
+          "name": "beats come more often than every livenessSeconds / 2",
           "ok": true
         },
         {
-          "name": "the answer is a refusal, never an allow option",
+          "name": "no beat after the turn's Stop",
           "ok": true
         },
         {
-          "name": "Notification/permission_prompt is posted",
+          "name": "asked: the runner opens its conversation",
           "ok": true
         },
         {
-          "name": "what was asked is shown in the pane",
+          "name": "asked: the request is submitted",
           "ok": true
         },
         {
-          "name": "no idle Stop or beat while holding that attention",
+          "name": "asked: no beat while the ask waits on a person",
           "ok": true
         },
         {
-          "name": "the next prompt is accepted as usual, which clears it",
+          "name": "asked: after the answer, active/permission_resolved names the turn and the ask, before any beat",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the quiet turn's beats go on, with no ask to resolve",
           "ok": true
         }
       ]
+    },
+    {
+      "id": "4",
+      "title": "Permissions: permitted when no one can be asked; refused and held only on denied_by_seat or no allow option",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "404: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "unreachable: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "no allow option: the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "404: the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "unreachable: the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "no allow option: the agent's permission request is sent",
+          "ok": true
+        },
+        {
+          "name": "404: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "404: it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "404: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "unreachable: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "unreachable: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the answer is a refusal, never an allow option",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: what was asked is shown in the pane",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the answer is a refusal, never an allow option",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: /abort sends session/cancel",
+          "ok": true
+        },
+        {
+          "name": "no allow option: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "no allow option: it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "no allow option: the answer is a refusal, never an allow option",
+          "ok": true
+        },
+        {
+          "name": "no allow option: Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: no idle Stop or beat while holding that attention",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the next prompt is accepted as usual, which clears it",
+          "ok": true
+        },
+        {
+          "name": "404: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "404: nothing is held as needs input",
+          "ok": true
+        },
+        {
+          "name": "unreachable: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unreachable: nothing is held as needs input",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: no idle Stop or beat while holding that attention",
+          "ok": true
+        },
+        {
+          "name": "no allow option: no idle Stop or beat while holding that attention",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the next prompt is accepted as usual, which clears it",
+          "ok": true
+        },
+        {
+          "name": "no allow option: the next prompt is accepted as usual, which clears it",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "4b",
+      "title": "Answered permissions: the person's answer or OpenRig's permit reaches the live request, and nothing else does",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "allow: the request is submitted to /api/activity/permission-requests",
+          "ok": true
+        },
+        {
+          "name": "the submit passes OpenRig's checks",
+          "ok": true
+        },
+        {
+          "name": "it uses the hook token",
+          "ok": true
+        },
+        {
+          "name": "requestId is the agent's JSON-RPC id",
+          "ok": true
+        },
+        {
+          "name": "turnId is the accepted prompt's",
+          "ok": true
+        },
+        {
+          "name": "nativeRef and generation name this conversation and occupant",
+          "ok": true
+        },
+        {
+          "name": "the agent's options are passed on as offered",
+          "ok": true
+        },
+        {
+          "name": "allow: the agent gets the chosen option",
+          "ok": true
+        },
+        {
+          "name": "allow: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "OpenRig records the prompt; the runner doesn't post permission_prompt itself",
+          "ok": true
+        },
+        {
+          "name": "each read waits at most 25 s",
+          "ok": true
+        },
+        {
+          "name": "after the answer, the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "deny: the request is submitted to /api/activity/permission-requests",
+          "ok": true
+        },
+        {
+          "name": "deny: the agent gets the chosen option",
+          "ok": true
+        },
+        {
+          "name": "deny: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "duplicate_request: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_revoked: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "stale_generation: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_pending: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "unlisted read status (500): the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_stale read: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "permitted at read: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "permitted at read, with the person's words: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "unlisted read state (deferred): the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "refused read (said_no): the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "stale ask: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "stale_generation: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_stale read: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: there's no ask to read",
+          "ok": true
+        },
+        {
+          "name": "duplicate_request: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "duplicate_request: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_pending: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_pending: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "refused read (said_no): nothing is held",
+          "ok": true
+        },
+        {
+          "name": "stale ask: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_revoked: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_revoked: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: the ask is still withdrawn at the turn's end",
+          "ok": true
+        },
+        {
+          "name": "unlisted read status (500): it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "unlisted read status (500): the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unlisted read status (500): the ask is still withdrawn at the turn's end",
+          "ok": true
+        },
+        {
+          "name": "permitted at read: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at read: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "permitted at read, with the person's words: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at read, with the person's words: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unlisted read state (deferred): it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "unlisted read state (deferred): the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unlisted read state (deferred): the ask is still withdrawn at the turn's end",
+          "ok": true
+        },
+        {
+          "name": "pending: the runner keeps reading the ask",
+          "ok": true
+        },
+        {
+          "name": "pending: nothing is delivered while no one has answered",
+          "ok": true
+        },
+        {
+          "name": "pending: no idle Stop while it waits",
+          "ok": true
+        },
+        {
+          "name": "pending: a pasted message isn't an answer",
+          "ok": true
+        },
+        {
+          "name": "pending: /abort withdraws the ask with turn_cancelled",
+          "ok": true
+        },
+        {
+          "name": "pending: the agent's request is answered cancelled",
+          "ok": true
+        },
+        {
+          "name": "pending: after /abort, the turn's end is reported, holding nothing",
+          "ok": true
+        },
+        {
+          "name": "pending: an answer after the withdraw isn't delivered",
+          "ok": true
+        },
+        {
+          "name": "turn end: the ask is withdrawn with turn_ended",
+          "ok": true
+        },
+        {
+          "name": "turn end: nothing is held once the ask is withdrawn",
+          "ok": true
+        },
+        {
+          "name": "agent exit: the ask is withdrawn with exited",
+          "ok": true
+        }
+      ]
+    },
+    {
+      "id": "4c",
+      "title": "The person's words: a read's said is queued to the agent as a prompt (advisory)",
+      "status": "advisory",
+      "checks": [
+        {
+          "name": "the runner opens its conversation",
+          "ok": true
+        },
+        {
+          "name": "the first turn ends",
+          "ok": true
+        },
+        {
+          "name": "the person's words are queued to the agent as a prompt, after the turn",
+          "ok": true
+        }
+      ],
+      "proposed": true,
+      "met": true
     },
     {
       "id": "5",
@@ -372,9 +839,9 @@
     }
   ],
   "summary": {
-    "pass": 11,
+    "pass": 13,
     "fail": 0,
     "skip": 0,
-    "advisory": 1
+    "advisory": 2
   }
 }

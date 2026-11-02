@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pre-beat runner: dsh-seat f029719cc (the build the #43 observation pinned).
+set -eu
+exec "<PATH_TO_DSH_SEAT_PRE>/bin/dsh-seat" \
+  --agent-command "/usr/bin/env node <PATH_TO_FAKE_AGENT> --log <PATH_TO_LOG> --silence 60000"

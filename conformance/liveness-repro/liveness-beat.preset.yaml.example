@@ -1,0 +1,10 @@
+format: 1
+name: liveness-beat
+command: <PATH_TO_RUN_SEAT_BEAT>
+maintainer: <your name>
+runner: true
+launch_result: true
+first_input: true
+limits:
+  - sanitized reproduction only: a fake ACP agent stands in for the harness, so no model, credentials or network are used
+  - this build posts active/liveness every 5 s with livenessSeconds 15; it is dsh-seat PR #9 head 454aab3c (open)

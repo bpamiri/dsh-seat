@@ -1,0 +1,13 @@
+version: "0.2"
+name: liveness-pre-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: agent
+        agent_ref: local:agents/agent
+        profile: default
+        runtime: liveness-pre
+        cwd: "."
+    edges: []
+edges: []

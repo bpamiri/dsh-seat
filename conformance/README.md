@@ -5,8 +5,8 @@ This directory records the result of OpenRig's official runner conformance check
 
 ## Checker
 
-From OpenRig `upstream/main` at `ff604d943` (the draft harness/runner contract and checker
-published with 0.7.6):
+From OpenRig `upstream/main` at `2b929b3d7` — the updated checker from #2368/#2375, after
+0.7.7 (sections 4 and 7 changed; the old `ff604d943` copy is not used):
 
 - `docs/reference/runner-conformance/check-runner.mjs`
 - `docs/reference/runner-conformance/fake-acp-agent.mjs`
@@ -38,7 +38,10 @@ credentials or network are involved.
 | 1b failed handshake | pass |
 | 2 input, queue, cancel | pass |
 | 3 activity | pass |
-| 4 permissions | pass |
+| 3b working beat (§4, 0.7.9) | pass |
+| 4 default permit / refuse-and-hold (§7, 0.7.8) | pass |
+| 4b answered permissions (§7, 0.7.8) | pass |
+| 4c person's words queued (advisory) | met — never counted |
 | 5 generation | pass |
 | 6 resume | pass |
 | 7 death mid-turn | pass |
@@ -47,7 +50,16 @@ credentials or network are involved.
 | 8 unknown request | pass |
 | 9 first input | pass |
 
-Summary: **11 pass, 0 fail, 0 skip, 1 advisory (met)**.
+Summary: **13 pass, 0 fail, 0 skip, 2 advisory (both met)**.
+
+The updated checker added cases 3b, 4b and 4c and reworked case 4. The eleven original case IDs
+remain and pass under the updated checker; case 4 was reworked for the 0.7.8 permit default, and
+the old checker's case 4 fails by design because it asserts refuse-by-default. The checker's fake
+agent stands in for dsh and scripts the ask/permit routes; a real person answering, and a real
+0.7.8/0.7.9 daemon, were not available here.
+
+A sanitized liveness reproduction (pre-beat vs working-beat post timelines and a local harness) lives in
+[`liveness-repro/`](liveness-repro/README.md).
 
 ## Real dsh check (outside the checker)
 
@@ -87,5 +99,8 @@ check.
 - How OpenRig reads the posts (working/idle/needs input/unknown after exit) — that is OpenRig's side.
 - Real dsh turn behaviour, permissions, model/provider wiring, pty paste/truncation, or a stored
   credential login.
+- A real person answering (the checker scripts the ask/read routes), or a real 0.7.8/0.7.9 daemon.
+- How a 0.7.6/0.7.7 daemon treats the beat event: only the 404-permit path is exercised here; the
+  beat event is not available to test against that daemon.
 - The model handoff: the checker cannot see the wire, and OpenRig shows the effective model as
   unknown.

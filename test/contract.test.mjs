@@ -276,6 +276,9 @@ function activityFixture({ pending = () => false, enabled = () => true } = {}) {
     post: (hookEvent, subtype, extra = {}) => { posts.push({ hookEvent, subtype, ...extra }); },
     hasPendingPost: pending,
     enabled,
+    // These tests predate the working beat; keep it out of their expected
+    // sequences and cover it explicitly below.
+    workingBeatMs: 1_000_000,
   });
   return { posts, reporter };
 }
@@ -481,4 +484,283 @@ test("entrypoint guard: a symlinked invocation is started directly; an import is
   assert.equal(isEntrypoint(process.argv[1], moduleUrl), false, "importing the module must not run main");
   assert.equal(isEntrypoint(undefined, moduleUrl), false);
   assert.equal(isEntrypoint(join(dir, "missing"), moduleUrl), false, "a missing path is not the entrypoint");
+});
+
+// ── working beat (§4, 0.7.9) ────────────────────────────────────────────────
+function workingFixture({ workingBeatMs = 5_000, workingLivenessSeconds = 15 } = {}) {
+  const posts = [];
+  const reporter = createActivityReporter({
+    post: (hookEvent, subtype, extra = {}) => { posts.push({ hookEvent, subtype, ...extra }); },
+    workingBeatMs,
+    workingLivenessSeconds,
+  });
+  return { posts, reporter };
+}
+
+test("working beat: posts active/liveness for the open turn, before its Stop, and stops after it", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const { posts, reporter } = workingFixture();
+  reporter.beginTurn("7");
+  assert.equal(reporter.workingBeatArmed, true);
+  t.mock.timers.tick(4_999);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted"], "no beat before the interval");
+  t.mock.timers.tick(1);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "active/liveness"]);
+  t.mock.timers.tick(5_000);
+  assert.equal(posts.filter((post) => post.subtype === "liveness").length, 2);
+  assert.ok(posts.every((post) => post.turnId === "7"), "every post names the open turn");
+  assert.ok(posts.filter((post) => post.subtype === "liveness").every((post) => post.livenessSeconds === 15));
+  reporter.endTurn("end_turn");
+  assert.equal(reporter.workingBeatArmed, false);
+  t.mock.timers.tick(20_000);
+  assert.equal(posts.filter((post) => post.subtype === "liveness").length, 2, "no beat after Stop");
+  assert.deepEqual(kinds(posts).slice(-1), ["Stop/end_turn"]);
+});
+
+test("working beat: stops while a person is asked, posts permission_resolved first after the answer", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const { posts, reporter } = workingFixture();
+  reporter.beginTurn("3");
+  t.mock.timers.tick(5_000);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "active/liveness"]);
+  reporter.pauseWorking();
+  reporter.awaitingPerson();
+  t.mock.timers.tick(20_000);
+  assert.equal(posts.filter((post) => post.hookEvent === "active").length, 1, "no beat while the ask waits");
+  reporter.permissionResolved("ask-9");
+  assert.deepEqual(kinds(posts).slice(-1), ["active/permission_resolved"]);
+  assert.equal(posts.at(-1).askId, "ask-9");
+  t.mock.timers.tick(5_000);
+  assert.deepEqual(kinds(posts).slice(-1), ["active/liveness"], "the beat resumes after the answer");
+  reporter.endTurn("end_turn");
+});
+
+test("working beat: stops on permission attention, agent exit and shutdown", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const first = workingFixture();
+  first.reporter.beginTurn("1");
+  first.reporter.permission();
+  t.mock.timers.tick(30_000);
+  assert.equal(first.posts.filter((post) => post.subtype === "liveness").length, 0);
+
+  const second = workingFixture();
+  second.reporter.beginTurn("2");
+  second.reporter.agentExited();
+  t.mock.timers.tick(30_000);
+  assert.equal(second.posts.filter((post) => post.subtype === "liveness").length, 0);
+
+  const third = workingFixture();
+  third.reporter.beginTurn("3");
+  third.reporter.shutdown();
+  t.mock.timers.tick(30_000);
+  assert.equal(third.posts.filter((post) => post.subtype === "liveness").length, 0);
+  assert.equal(third.reporter.workingBeatArmed, false);
+});
+
+test("permissions: --deny refuses immediately, posts permission_prompt and submits nothing", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-deny-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  const submits = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      if (req.method === "POST" && req.url === "/api/activity/hooks") { hooks.push(body); res.writeHead(200).end("{}"); return; }
+      if (req.method === "POST" && req.url === "/api/activity/permission-requests") { submits.push(body); res.writeHead(404).end("{}"); return; }
+      res.writeHead(404).end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --mode permission`, "--deny"], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "perm-token", OPENRIG_SESSION_NAME: "perm@rig",
+      OPENRIG_NODE_ID: "node-perm", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-perm",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "perm-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  await waitFor(() => json(record));
+  child.stdin.write("edit the notes\n");
+  const answer = await waitFor(() => lines(log).find((entry) => entry.answer)?.answer);
+  assert.equal(answer?.outcome?.outcome, "cancelled");
+  assert.equal(submits.length, 0, "the --deny posture must not submit a permission request");
+  assert.ok(await waitFor(() => hooks.find((post) => post.hookEvent === "Notification" && post.subtype === "permission_prompt")), "permission_prompt not posted");
+});
+
+test("permissions: a 0.7.6/0.7.7 daemon's 404 permits with allow_once and posts no permission_prompt", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-404-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  let submits = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      if (req.method === "POST" && req.url === "/api/activity/hooks") { hooks.push(body); res.writeHead(200).end("{}"); return; }
+      if (req.method === "POST" && req.url === "/api/activity/permission-requests") { submits++; res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, code: "not_found" })); return; }
+      res.writeHead(404).end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --mode permission`], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "perm-token", OPENRIG_SESSION_NAME: "perm@rig",
+      OPENRIG_NODE_ID: "node-perm", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-perm",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "perm-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  await waitFor(() => json(record));
+  child.stdin.write("edit the notes\n");
+  const answer = await waitFor(() => lines(log).find((entry) => entry.answer)?.answer);
+  assert.deepEqual(answer, { outcome: { outcome: "selected", optionId: "allow-once" } });
+  assert.equal(submits, 1);
+  assert.equal(hooks.some((post) => post.hookEvent === "Notification" && post.subtype === "permission_prompt"), false,
+    "a permit must not post permission_prompt");
+});
+
+// ── concurrent permission asks: aggregate attention, all withdrawals ────────
+async function twoAskRun(t, { exitMode = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-two-asks-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  const submits = [];
+  const withdraws = [];
+  const byRequest = new Map();
+  const byAsk = new Map();
+  let seq = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      const url = new URL(req.url, "http://stand-in");
+      if (req.method === "POST" && url.pathname === "/api/activity/hooks") {
+        hooks.push({ ...body, receivedAt: Date.now() });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
+        submits.push({ ...body, at: Date.now() });
+        const key = String(body?.requestId);
+        let ask = byRequest.get(key);
+        if (!ask) {
+          ask = { askId: `ask-${++seq}`, requestId: key, reason: null, waiters: [] };
+          byRequest.set(key, ask);
+          byAsk.set(ask.askId, ask);
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, askId: ask.askId, created: true }));
+        return;
+      }
+      const withdraw = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)\/withdraw$/);
+      if (req.method === "POST" && withdraw) {
+        const ask = byAsk.get(decodeURIComponent(withdraw[1]));
+        if (ask) { ask.reason = body?.reason; for (const w of ask.waiters.splice(0)) w(ask); }
+        withdraws.push({ askId: decodeURIComponent(withdraw[1]), reason: body?.reason, at: Date.now() });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+      const read = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)$/);
+      if (req.method === "GET" && read) {
+        const ask = byAsk.get(decodeURIComponent(read[1]));
+        const answer = () => {
+          if (ask?.reason) {
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, state: "withdrawn" }));
+            return;
+          }
+          if (ask?.askId === "ask-2") {
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, state: "answered", optionId: "allow-once" }));
+            return;
+          }
+          ask?.waiters.push(answer);
+        };
+        if (ask?.askId === "ask-2") setTimeout(answer, 150);
+        else answer();
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, code: "not_found" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} ${exitMode ? "--two-asks-exit" : "--two-asks"}`], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "two-token", OPENRIG_SESSION_NAME: "two@rig",
+      OPENRIG_NODE_ID: "node-two", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-two",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "two-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  return { dir, log, record, hooks, submits, withdraws, child, childOut: () => childOut };
+}
+
+test("concurrent asks: no beat while any ask is open, and both withdrawn at turn end", async (t) => {
+  const run = await twoAskRun(t);
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  const secondSubmitAt = run.submits[1].at;
+  // One ask's allow answer reaches the agent; the other is still pending.
+  const answered = await waitFor(() => lines(run.log).find((entry) => (entry.id === 900 || entry.id === 901) && entry.result), 6000);
+  assert.ok(answered, "neither concurrent ask was answered");
+  await new Promise((resolve) => setTimeout(resolve, 5500)); // > one 5 s beat interval
+  const beats = run.hooks.filter((post) => post.hookEvent === "active" && post.subtype === "liveness"
+    && post.receivedAt > secondSubmitAt);
+  assert.equal(beats.length, 0, `a beat ran while ask-1 was still pending: ${JSON.stringify(beats)}`);
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "end_turn"), 12000), "no Stop/end_turn");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 4000), "not every open ask was withdrawn");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "turn_ended"), JSON.stringify(run.withdraws));
+  assert.equal(run.hooks.some((post) => post.subtype === "permission_prompt"), false);
+  const answers = lines(run.log).filter((entry) => (entry.id === 900 || entry.id === 901) && entry.result);
+  const answerIds = answers.map((entry) => entry.id);
+  assert.equal(new Set(answerIds).size, answerIds.length, `a request was answered more than once: ${JSON.stringify(answerIds)}`);
+  assert.equal(answers.filter((entry) => entry.result?.outcome?.outcome === "selected").length, 1, "exactly one selected option");
+});
+
+test("concurrent asks: /abort withdraws every open ask as turn_cancelled", async (t) => {
+  const run = await twoAskRun(t);
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  assert.ok(await waitFor(() => lines(run.log).find((entry) => (entry.id === 900 || entry.id === 901) && entry.result), 6000), "no ask answered");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  run.child.stdin.write("/abort\n");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 6000), "not every open ask was withdrawn on abort");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "turn_cancelled"), JSON.stringify(run.withdraws));
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "cancelled"), 6000), "no Stop/cancelled");
+  assert.equal(run.hooks.some((post) => post.subtype === "permission_prompt"), false);
+  const answers = lines(run.log).filter((entry) => (entry.id === 900 || entry.id === 901) && entry.result);
+  const answerIds = answers.map((entry) => entry.id);
+  assert.equal(new Set(answerIds).size, answerIds.length, `a request was answered more than once: ${JSON.stringify(answerIds)}`);
+});
+
+test("concurrent asks: agent exit withdraws every open ask as exited", async (t) => {
+  const run = await twoAskRun(t, { exitMode: true });
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 6000), "not every open ask was withdrawn on exit");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "exited"), JSON.stringify(run.withdraws));
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "dsh_exited"), 4000), "no Stop/dsh_exited");
+  assert.equal(run.hooks.filter((post) => post.hookEvent === "active" && post.subtype === "liveness").length, 0);
 });

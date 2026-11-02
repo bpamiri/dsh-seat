@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // dsh-seat — an OpenRig runner preset for DeepSeek Harness (dsh) over ACP v1.
 //
-// Implements the draft harness/runner contract (OpenRig 0.7.6):
+// Implements OpenRig's draft harness/runner contract (current through 0.7.9):
 //   * starts dsh --profile acp on stdio and speaks newline-delimited JSON-RPC;
 //   * writes the launch record after session/new (or a resume) is answered;
-//   * reports turn boundaries / permissions / exit to OpenRig's activity route;
+//   * reports turn boundaries, a working beat, permissions and exit;
 //   * one submitted pane block = one session/prompt, byte for byte;
-//   * refuses every permission request at once, and holds needs-input;
+//   * routes permissions to OpenRig's answered path (person or permit; --deny
+//     keeps the old refuse-and-hold posture);
 //   * never starts a new conversation on a resume.
 //
 // Dependency-free: node builtins only. Usage:
@@ -21,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
+import { createPermissionTransport, selectPermitOption } from "../src/permission.mjs";
 
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
@@ -31,6 +33,10 @@ const PROTOCOL_VERSION = 1;
 const CHUNK_POST_THROTTLE_MS = 10_000;
 const IDLE_HEARTBEAT_MS = 60_000;
 const IDLE_LIVENESS_SECONDS = 60;
+// Working beat (§4, from 0.7.9): one beat counts as working for 15 s; beat
+// every 5 s so a long quiet turn never ages out. Must be < liveness / 2.
+const WORKING_BEAT_MS = 5_000;
+const WORKING_LIVENESS_SECONDS = 15;
 const OPENRIG = {
   url: env("OPENRIG_URL"),
   port: env("OPENRIG_PORT"),
@@ -55,6 +61,9 @@ const argValue = (name, fallback = null) => {
 const agentCommand = argValue("--agent-command", "dsh --profile acp");
 const presetName = argValue("--name", OPENRIG.runtime);
 const requireResumeFlag = argv.includes("--require-resume");
+// Section 7's default is permit (a person answers, or no one can be asked); the
+// old refusal posture is an explicit opt-in.
+const denyPermissions = argv.includes("--deny");
 
 // DSH_SEAT_REQUIRE_RESUME is strict: exactly "1" turns it on, unset/empty/"0"
 // leaves it off, and any other value is a configuration error (never guessed).
@@ -178,14 +187,31 @@ export function createActivityReporter({
   throttleMs = CHUNK_POST_THROTTLE_MS,
   beatMs = IDLE_HEARTBEAT_MS,
   livenessSeconds = IDLE_LIVENESS_SECONDS,
+  workingBeatMs = WORKING_BEAT_MS,
+  workingLivenessSeconds = WORKING_LIVENESS_SECONDS,
 }) {
   let turn = null;          // { turnId, cancelSent, lastChunkPostAt }
   let attention = false;
   let beatTimer = null;
+  let workingTimer = null;
   let dead = false;         // the agent exited or the runner is shutting down
 
   function stopBeat() {
     if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
+  }
+  function stopWorking() {
+    if (workingTimer) { clearInterval(workingTimer); workingTimer = null; }
+  }
+  function startWorking() {
+    if (workingTimer || dead || !turn || attention || !enabled()) return;
+    workingTimer = setInterval(() => {
+      // The turn's Stop, a permission ask, attention or an exit retires the
+      // working beat; a post still in flight makes this beat skip.
+      if (dead || !turn || attention) { stopWorking(); return; }
+      if (hasPendingPost()) return;
+      post("active", "liveness", { turnId: turn.turnId, livenessSeconds: workingLivenessSeconds });
+    }, workingBeatMs);
+    workingTimer.unref?.();
   }
   function startBeat() {
     if (beatTimer || dead || turn || attention || !enabled()) return;
@@ -204,11 +230,15 @@ export function createActivityReporter({
     get attentionHeld() { return attention; },
     get beatArmed() { return beatTimer !== null; },
     get beatHandle() { return beatTimer; },
+    get workingBeatArmed() { return workingTimer !== null; },
+    get workingBeatHandle() { return workingTimer; },
     beginTurn(turnId) {
       stopBeat();
+      stopWorking();
       attention = false;
       turn = { turnId, cancelSent: false, lastChunkPostAt: -Infinity };
       post("UserPromptSubmit", "accepted", { turnId });
+      startWorking();
       return turn;
     },
     // Every real tool call is working evidence and posts unthrottled: a tool
@@ -232,10 +262,36 @@ export function createActivityReporter({
       post("active", "agent_message", { turnId: turn.turnId });
       return true;
     },
+    // Refuse-and-hold (the seat's --deny, denied_by_seat, options_unsupported,
+    // or a local no-allow refusal).
     permission() {
       attention = true;
       stopBeat();
+      stopWorking();
       post("Notification", "permission_prompt", turn ? { turnId: turn.turnId } : {});
+    },
+    // A submit is in flight: stop the beat without deciding attention yet, so a
+    // permit-at-submit can resume it at once and an ask-created can hold it.
+    pauseWorking() { stopWorking(); },
+    // OpenRig created an ask and recorded permission_prompt itself; hold
+    // attention without posting one, and keep the working beat stopped.
+    awaitingPerson() {
+      stopWorking();
+      stopBeat();
+      attention = true;
+    },
+    // A permit/answer reached the agent: clear attention, post the 0.7.9
+    // boundary before any beat, and resume the working beat for the same turn.
+    permissionResolved(askId) {
+      attention = false;
+      if (turn) post("active", "permission_resolved", { turnId: turn.turnId, askId });
+      startWorking();
+    },
+    // A refused/withdrawn/stale read or a permit-at-submit with no ask: clear
+    // attention (nobody waits) and resume the beat if the turn continues.
+    permissionSettled() {
+      attention = false;
+      startWorking();
     },
     // The turn ended on the agent's own stop reason (end_turn, cancelled, …).
     // Never a Stop while attention is held: OpenRig reads any non-exit Stop as
@@ -243,6 +299,7 @@ export function createActivityReporter({
     endTurn(stopReason) {
       if (!turn) return null;
       const ended = turn;
+      stopWorking();
       turn = null;
       if (!attention) post("Stop", stopReason, { turnId: ended.turnId, livenessSeconds });
       return ended;
@@ -255,8 +312,8 @@ export function createActivityReporter({
       return ended;
     },
     idle() { startBeat(); },
-    agentExited() { dead = true; stopBeat(); },
-    shutdown() { dead = true; stopBeat(); },
+    agentExited() { dead = true; stopBeat(); stopWorking(); },
+    shutdown() { dead = true; stopBeat(); stopWorking(); },
   };
 }
 
@@ -338,9 +395,13 @@ function startAgent(dshHome) {
     // No idle heartbeat once the agent is gone; the exit Stop below is final.
     activity.agentExited();
     if (!shuttingDown) {
-      warn(`agent exited (code=${code} signal=${signal})`);
-      post("Stop", `${presetName}_exited`);
-      void drainPosts().then(() => stop(code === 0 ? 0 : 1, "agent-exit"));
+      void (async () => {
+        await withdrawAllAsks("exited");
+        warn(`agent exited (code=${code} signal=${signal})`);
+        post("Stop", `${presetName}_exited`);
+        await drainPosts();
+        await stop(code === 0 ? 0 : 1, "agent-exit");
+      })();
     }
   });
   let buffer = "";
@@ -381,14 +442,192 @@ function handleAgentLine(raw) {
 
 function handleAgentRequest(msg) {
   if (msg.method === "session/request_permission") {
-    const tool = msg.params?.toolCall ?? {};
-    const title = tool.title ?? tool.toolCallId ?? "a tool";
-    line(`[permission] ${title} — refused (first-version runner)`);
-    activity.permission();
-    send({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "cancelled" } } });
+    void handlePermissionRequest(msg);
     return;
   }
   send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } });
+}
+
+// ── answered permissions (contract §7) ──────────────────────────────────────
+// Real dsh can have more than one approval outstanding (parallel tool calls), so
+// asks are tracked in a Map keyed by the agent's request id. Attention and the
+// working beat are aggregate state: no beat while any ask is open, and an ask's
+// resolution only clears attention when it was the last one (and no refusal is
+// holding attention).
+const openAsks = new Map();
+let refusedHeld = false;
+let permissionTransport = null;
+function permissions() {
+  if (!endpoint?.token) return null;
+  permissionTransport ??= createPermissionTransport({ base: endpoint.base, token: endpoint.token });
+  return permissionTransport;
+}
+const askKey = (requestId) => String(requestId);
+async function submitPermission(body) {
+  const transport = permissions();
+  if (!transport) return { kind: "permit", optionId: null, reason: "no OpenRig endpoint" };
+  try { return await transport.submit(body); }
+  catch { return { kind: "permit", optionId: null, reason: "OpenRig unreachable" }; }
+}
+async function readPermission(ask, turn) {
+  const transport = permissions();
+  if (!transport) return { kind: "permit", optionId: null, reason: "no OpenRig endpoint" };
+  const controller = new AbortController();
+  const onDone = () => controller.abort();
+  turn.waiters.add(onDone);
+  try {
+    while (!turn.finished) {
+      try {
+        const classified = await transport.readOnce(ask.askId, { signal: controller.signal });
+        if (classified.kind !== "pending") return classified;
+      } catch (error) {
+        if (turn.finished) return { kind: "cancelled", reason: turn.cancelSent ? "turn_cancelled" : "turn_ended" };
+        // A bounded read that timed out (or another transport failure) is "no
+        // answer": nobody can be asked, so permit, never hold the turn.
+        return { kind: "permit", optionId: null, reason: error?.name === "PermissionTimeoutError" ? "read timed out" : "read got no answer" };
+      }
+    }
+    return { kind: "cancelled", reason: turn.cancelSent ? "turn_cancelled" : "turn_ended" };
+  } finally {
+    turn.waiters.delete(onDone);
+  }
+}
+async function withdrawPermission(askId, reason) {
+  try { await permissions()?.withdraw(askId, reason); } catch { /* best effort */ }
+}
+function answerPermission(ask, result) {
+  if (ask.answered) return;
+  ask.answered = true;
+  if (childExited || shuttingDown) return;
+  send({ jsonrpc: "2.0", id: ask.requestId, result });
+}
+// Only asks still waiting on a person hold attention; a read that already
+// delivered a permit stays in the map so its ask is withdrawn at turn end, but
+// it no longer counts as attention.
+function hasPendingAsk() {
+  for (const ask of openAsks.values()) if (!ask.answered && !ask.held) return true;
+  return false;
+}
+// Remove one ask and update the aggregate attention/beat state only when nothing
+// else is asking (and no refused ask is holding attention). `preserve` keeps an
+// already-answered ask in the map for the turn-end withdraw.
+function settleAsk(ask, { resolved = false, preserve = false } = {}) {
+  if (preserve) ask.answered = true;
+  else openAsks.delete(askKey(ask.requestId));
+  if (hasPendingAsk() || refusedHeld) return;
+  if (resolved && ask.askId) activity.permissionResolved(ask.askId);
+  else activity.permissionSettled();
+}
+async function withdrawAllAsks(reason) {
+  const asks = [...openAsks.values()];
+  openAsks.clear();
+  const pendingWithdraws = [];
+  for (const ask of asks) {
+    if (!ask.answered) answerPermission(ask, { outcome: { outcome: "cancelled" } });
+    if (ask.askId && !ask.withdrawn) {
+      ask.withdrawn = true;
+      pendingWithdraws.push(withdrawPermission(ask.askId, reason));
+    }
+  }
+  // Clear the aggregate attention before the withdraw round-trips, so a turn
+  // settling meanwhile can post its Stop.
+  if (asks.length > 0 && !refusedHeld) activity.permissionSettled();
+  await Promise.all(pendingWithdraws);
+  return asks.length > 0;
+}
+function queueSaid(said) {
+  if (typeof said !== "string" || !said.trim()) return;
+  // Section 7's optional 0.7.9 behaviour: a person's own words reach the agent
+  // as an ordinary prompt, after this turn and behind anything already queued.
+  queue.push(said);
+}
+async function handlePermissionRequest(msg) {
+  const key = askKey(msg.id);
+  if (openAsks.has(key)) return; // the same agent request id is already live
+  const tool = msg.params?.toolCall ?? {};
+  const title = tool.title ?? tool.toolCallId ?? "a tool";
+  const options = Array.isArray(msg.params?.options) ? msg.params.options : [];
+  const turn = activity.turn;
+  const ask = { requestId: msg.id, askId: null, answered: false, withdrawn: false, held: false, turn };
+  openAsks.set(key, ask);
+  const refuseHold = (why) => {
+    line(`[permission] ${title} — refused (${why})`);
+    ask.held = true;
+    refusedHeld = true;
+    openAsks.delete(key);
+    activity.permission();
+    answerPermission(ask, { outcome: { outcome: "cancelled" } });
+  };
+  if (!turn) { openAsks.delete(key); answerPermission(ask, { outcome: { outcome: "cancelled" } }); return; }
+  if (denyPermissions) { refuseHold("--deny"); return; }
+
+  activity.pauseWorking();
+  const submitted = await submitPermission({
+    sessionName: OPENRIG.session,
+    nodeId: OPENRIG.nodeId,
+    generation: OPENRIG.generation,
+    nativeRef: sessionId,
+    turnId: turn.turnId,
+    requestId: msg.id,
+    toolCall: { title, kind: typeof tool.kind === "string" && tool.kind ? tool.kind : "tool" },
+    options: options.map((option) => ({
+      optionId: option?.optionId,
+      name: option?.name ?? option?.optionId,
+      kind: option?.kind,
+    })),
+    occurredAt: new Date().toISOString(),
+  });
+  if (turn.finished) {
+    openAsks.delete(key);
+    if (ask.askId) { ask.withdrawn = true; await withdrawPermission(ask.askId, turn.cancelSent ? "turn_cancelled" : "turn_ended"); }
+    answerPermission(ask, { outcome: { outcome: "cancelled" } });
+    return;
+  }
+
+  if (submitted.kind === "refuse-hold") { refuseHold(submitted.reason); return; }
+  if (submitted.kind === "cancel") {
+    answerPermission(ask, { outcome: { outcome: "cancelled" } });
+    settleAsk(ask);
+    return;
+  }
+  if (submitted.kind === "permit") {
+    const optionId = submitted.optionId ?? selectPermitOption(options);
+    if (!optionId) { refuseHold("no allow option"); return; }
+    answerPermission(ask, { outcome: { outcome: "selected", optionId } });
+    settleAsk(ask, { resolved: false });
+    return;
+  }
+
+  // A person is asked: hold attention (OpenRig posted permission_prompt), read
+  // until they answer or the turn ends, and deliver once.
+  ask.askId = submitted.askId;
+  activity.awaitingPerson();
+  const read = await readPermission(ask, turn);
+  if (turn.finished || !openAsks.has(key)) return;
+  if (read.kind === "selected") {
+    answerPermission(ask, { outcome: { outcome: "selected", optionId: read.optionId } });
+    // Keep the answered ask until turn end: the contract withdraws every open
+    // request when the turn ends, and a later answer can't be delivered.
+    settleAsk(ask, { resolved: true, preserve: true });
+    queueSaid(read.said);
+    return;
+  }
+  if (read.kind === "permit") {
+    const optionId = read.optionId ?? selectPermitOption(options);
+    if (!optionId) { refuseHold("no allow option"); return; }
+    answerPermission(ask, { outcome: { outcome: "selected", optionId } });
+    // The ask may still be open on OpenRig's side; keep it for the turn-end
+    // withdraw while clearing attention for the permit already delivered.
+    settleAsk(ask, { resolved: true, preserve: true });
+    queueSaid(read.said);
+    return;
+  }
+  if (read.kind === "refuse-hold") { refuseHold(read.reason); return; }
+  // refused / withdrawn / stale / cancel: no person is still waiting on this one.
+  if (read.reason === "withdrawn" || read.reason === "stale") ask.withdrawn = true;
+  answerPermission(ask, { outcome: { outcome: "cancelled" } });
+  settleAsk(ask);
+  queueSaid(read.said);
 }
 
 function handleAgentNotification(msg) {
@@ -429,6 +668,7 @@ let escapeBuffer = "";
 let promptQueued = false;
 let turnCount = 0;
 const queue = [];
+// open permission asks are tracked in bin's answered-permissions section
 
 function handleInputChunk(chunk) {
   for (const char of String(chunk)) {
@@ -482,6 +722,9 @@ function cancelTurn() {
   if (turn.cancelSent) return;
   turn.cancelSent = true;
   send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+  // An ask waiting on a person is withdrawn now: its answer unblocks the agent
+  // so session/cancel can settle the turn, and no person is still waiting.
+  void withdrawAllAsks("turn_cancelled");
   line("[dsh-seat] cancel requested");
 }
 
@@ -490,21 +733,31 @@ async function pump() {
   const text = queue.shift();
   if (text === undefined) return;
   promptQueued = true;
+  refusedHeld = false;
   const turn = activity.beginTurn(String(++turnCount));
+  turn.finished = false;
+  turn.waiters = new Set();
   line(`you ▸ ${text.split("\n")[0].slice(0, 160)}${text.includes("\n") ? " …" : ""}`);
+  let stopReason = "end_turn";
+  let failed = false;
   try {
     const result = await request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
-    const stopReason = typeof result?.stopReason === "string" ? result.stopReason : "end_turn";
-    // Only the agent's own reply ends the turn. A cancel request does not: the
-    // turn stays open (and the beat stays off) until this prompt settles.
-    activity.endTurn(stopReason);
+    stopReason = typeof result?.stopReason === "string" ? result.stopReason : "end_turn";
   } catch (error) {
+    failed = true;
     if (!childExited && !shuttingDown) {
       warn(`prompt failed: ${error.message}`);
-      post("Notification", "runtime_error", turn ? { turnId: turn.turnId } : {});
+      post("Notification", "runtime_error", { turnId: turn.turnId });
     }
-    activity.abandonTurn();
   } finally {
+    // End the turn *after* any ask is withdrawn: a waiter can then settle the
+    // cancelled turn as usual, while a refused-and-held permission keeps its
+    // attention and suppresses the Stop.
+    turn.finished = true;
+    for (const waiter of turn.waiters) { try { waiter(); } catch { /* best effort */ } }
+    turn.waiters.clear();
+    await withdrawAllAsks(turn.cancelSent ? "turn_cancelled" : "turn_ended");
+    if (failed) activity.abandonTurn(); else activity.endTurn(stopReason);
     promptQueued = false;
     // The next queued prompt arms a new turn (which stops the beat); an empty
     // queue lets the idle heartbeat start now that the turn has settled.
@@ -624,6 +877,7 @@ function killAgent(signal) {
 async function stop(code, why) {
   if (shuttingDown) return;
   shuttingDown = true;
+  await withdrawAllAsks("exited");
   activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);

@@ -1,0 +1,14 @@
+name: liveness-agent
+version: "1.0"
+profiles:
+  default:
+    uses:
+      skills: []
+      guidance: []
+      subagents: []
+      plugins: []
+      runtime_resources: []
+resources: {}
+startup:
+  files: []
+  actions: []

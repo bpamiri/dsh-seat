@@ -1,0 +1,10 @@
+format: 1
+name: liveness-pre
+command: <PATH_TO_RUN_SEAT_PRE>
+maintainer: <your name>
+runner: true
+launch_result: true
+first_input: true
+limits:
+  - sanitized reproduction only: a fake ACP agent stands in for the harness, so no model, credentials or network are used
+  - this build posts no active/liveness beat; it is dsh-seat f029719cc (pre-beat)

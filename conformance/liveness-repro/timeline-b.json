@@ -1,0 +1,145 @@
+{
+  "capture": "b",
+  "build": "dsh-seat 454aab3c64e71c1e5e185d45d21e92cb60b36e62 (PR #9 head; working beat + openrig-40 fixes)",
+  "fakeTurnSilenceMs": 60000,
+  "runAt": "2026-11-02",
+  "note": "Working beat: active/liveness every ~5 s with livenessSeconds 15.",
+  "posts": [
+    {
+      "offsetMs": 0.0,
+      "receivedDelayMs": 34.0,
+      "hookEvent": "UserPromptSubmit",
+      "subtype": "accepted",
+      "turnId": "1",
+      "sequence": 1,
+      "livenessSeconds": null
+    },
+    {
+      "offsetMs": 5001.0,
+      "receivedDelayMs": 2.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 2,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 10001.0,
+      "receivedDelayMs": 4.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 3,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 15002.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 4,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 20003.0,
+      "receivedDelayMs": 2.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 5,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 25004.0,
+      "receivedDelayMs": 2.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 6,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 30004.0,
+      "receivedDelayMs": 3.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 7,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 35005.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 8,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 40006.0,
+      "receivedDelayMs": 4.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 9,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 45007.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 10,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 50008.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 11,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 55009.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "liveness",
+      "turnId": "1",
+      "sequence": 12,
+      "livenessSeconds": 15
+    },
+    {
+      "offsetMs": 60003.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "active",
+      "subtype": "agent_message",
+      "turnId": "1",
+      "sequence": 13,
+      "livenessSeconds": null
+    },
+    {
+      "offsetMs": 60004.0,
+      "receivedDelayMs": 1.0,
+      "hookEvent": "Stop",
+      "subtype": "end_turn",
+      "turnId": "1",
+      "sequence": 14,
+      "livenessSeconds": 60
+    }
+  ],
+  "agent": [
+    {
+      "event": "prompt-start",
+      "offsetMs": 1.0
+    },
+    {
+      "event": "prompt-end",
+      "offsetMs": 60003.0
+    }
+  ]
+}
