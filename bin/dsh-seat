@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
-import { classifyRead, classifySubmit, selectPermitOption } from "../src/permission.mjs";
+import { createPermissionTransport, selectPermitOption } from "../src/permission.mjs";
 
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
@@ -396,7 +396,7 @@ function startAgent(dshHome) {
     activity.agentExited();
     if (!shuttingDown) {
       void (async () => {
-        await withdrawCurrentAsk("exited");
+        await withdrawAllAsks("exited");
         warn(`agent exited (code=${code} signal=${signal})`);
         post("Stop", `${presetName}_exited`);
         await drainPosts();
@@ -449,44 +449,42 @@ function handleAgentRequest(msg) {
 }
 
 // ── answered permissions (contract §7) ──────────────────────────────────────
-function permissionUrl(askId, action = "") {
-  const suffix = askId ? `/${encodeURIComponent(askId)}${action ? `/${action}` : ""}` : "";
-  return `${endpoint.base}/api/activity/permission-requests${suffix}`;
+// Real dsh can have more than one approval outstanding (parallel tool calls), so
+// asks are tracked in a Map keyed by the agent's request id. Attention and the
+// working beat are aggregate state: no beat while any ask is open, and an ask's
+// resolution only clears attention when it was the last one (and no refusal is
+// holding attention).
+const openAsks = new Map();
+let refusedHeld = false;
+let permissionTransport = null;
+function permissions() {
+  if (!endpoint?.token) return null;
+  permissionTransport ??= createPermissionTransport({ base: endpoint.base, token: endpoint.token });
+  return permissionTransport;
 }
+const askKey = (requestId) => String(requestId);
 async function submitPermission(body) {
-  if (!endpoint?.token) return { kind: "permit", optionId: null, reason: "no OpenRig endpoint" };
-  try {
-    const res = await fetch(permissionUrl(), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
-    let json = null;
-    try { json = await res.json(); } catch { /* status decides */ }
-    return classifySubmit(res.status, json);
-  } catch {
-    return { kind: "permit", optionId: null, reason: "OpenRig unreachable" };
-  }
+  const transport = permissions();
+  if (!transport) return { kind: "permit", optionId: null, reason: "no OpenRig endpoint" };
+  try { return await transport.submit(body); }
+  catch { return { kind: "permit", optionId: null, reason: "OpenRig unreachable" }; }
 }
-async function readPermission(askId, turn) {
+async function readPermission(ask, turn) {
+  const transport = permissions();
+  if (!transport) return { kind: "permit", optionId: null, reason: "no OpenRig endpoint" };
   const controller = new AbortController();
   const onDone = () => controller.abort();
   turn.waiters.add(onDone);
   try {
     while (!turn.finished) {
       try {
-        const res = await fetch(`${permissionUrl(askId)}?waitSeconds=25`, {
-          headers: { authorization: `Bearer ${endpoint.token}` },
-          signal: controller.signal,
-        });
-        let json = null;
-        try { json = await res.json(); } catch { /* status decides */ }
-        const classified = classifyRead(res.status, json);
+        const classified = await transport.readOnce(ask.askId, { signal: controller.signal });
         if (classified.kind !== "pending") return classified;
-      } catch {
+      } catch (error) {
         if (turn.finished) return { kind: "cancelled", reason: turn.cancelSent ? "turn_cancelled" : "turn_ended" };
-        return { kind: "permit", optionId: null, reason: "read got no answer" };
+        // A bounded read that timed out (or another transport failure) is "no
+        // answer": nobody can be asked, so permit, never hold the turn.
+        return { kind: "permit", optionId: null, reason: error?.name === "PermissionTimeoutError" ? "read timed out" : "read got no answer" };
       }
     }
     return { kind: "cancelled", reason: turn.cancelSent ? "turn_cancelled" : "turn_ended" };
@@ -495,15 +493,7 @@ async function readPermission(askId, turn) {
   }
 }
 async function withdrawPermission(askId, reason) {
-  if (!endpoint?.token) return;
-  try {
-    await fetch(permissionUrl(askId, "withdraw"), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
-      body: JSON.stringify({ reason }),
-      signal: AbortSignal.timeout(2000),
-    });
-  } catch { /* the ask is advisory to a person; never hold the runner */ }
+  try { await permissions()?.withdraw(askId, reason); } catch { /* best effort */ }
 }
 function answerPermission(ask, result) {
   if (ask.answered) return;
@@ -511,20 +501,39 @@ function answerPermission(ask, result) {
   if (childExited || shuttingDown) return;
   send({ jsonrpc: "2.0", id: ask.requestId, result });
 }
-async function withdrawCurrentAsk(reason) {
-  const ask = currentAsk;
-  if (!ask) return false;
-  if (ask.held) { currentAsk = null; return false; }
-  currentAsk = null;
-  if (!ask.answered) answerPermission(ask, { outcome: { outcome: "cancelled" } });
-  // Nobody is waiting on this ask any more: clear attention *before* the
-  // withdraw request, so a turn settling meanwhile still posts its Stop.
-  activity.permissionSettled();
-  if (ask.askId && !ask.withdrawn) {
-    ask.withdrawn = true;
-    await withdrawPermission(ask.askId, reason);
+// Only asks still waiting on a person hold attention; a read that already
+// delivered a permit stays in the map so its ask is withdrawn at turn end, but
+// it no longer counts as attention.
+function hasPendingAsk() {
+  for (const ask of openAsks.values()) if (!ask.answered && !ask.held) return true;
+  return false;
+}
+// Remove one ask and update the aggregate attention/beat state only when nothing
+// else is asking (and no refused ask is holding attention). `preserve` keeps an
+// already-answered ask in the map for the turn-end withdraw.
+function settleAsk(ask, { resolved = false, preserve = false } = {}) {
+  if (preserve) ask.answered = true;
+  else openAsks.delete(askKey(ask.requestId));
+  if (hasPendingAsk() || refusedHeld) return;
+  if (resolved && ask.askId) activity.permissionResolved(ask.askId);
+  else activity.permissionSettled();
+}
+async function withdrawAllAsks(reason) {
+  const asks = [...openAsks.values()];
+  openAsks.clear();
+  const pendingWithdraws = [];
+  for (const ask of asks) {
+    if (!ask.answered) answerPermission(ask, { outcome: { outcome: "cancelled" } });
+    if (ask.askId && !ask.withdrawn) {
+      ask.withdrawn = true;
+      pendingWithdraws.push(withdrawPermission(ask.askId, reason));
+    }
   }
-  return true;
+  // Clear the aggregate attention before the withdraw round-trips, so a turn
+  // settling meanwhile can post its Stop.
+  if (asks.length > 0 && !refusedHeld) activity.permissionSettled();
+  await Promise.all(pendingWithdraws);
+  return asks.length > 0;
 }
 function queueSaid(said) {
   if (typeof said !== "string" || !said.trim()) return;
@@ -533,20 +542,23 @@ function queueSaid(said) {
   queue.push(said);
 }
 async function handlePermissionRequest(msg) {
+  const key = askKey(msg.id);
+  if (openAsks.has(key)) return; // the same agent request id is already live
   const tool = msg.params?.toolCall ?? {};
   const title = tool.title ?? tool.toolCallId ?? "a tool";
   const options = Array.isArray(msg.params?.options) ? msg.params.options : [];
   const turn = activity.turn;
-  const ask = { requestId: msg.id, askId: null, answered: false, withdrawn: false, turn };
-  currentAsk = ask;
+  const ask = { requestId: msg.id, askId: null, answered: false, withdrawn: false, held: false, turn };
+  openAsks.set(key, ask);
   const refuseHold = (why) => {
     line(`[permission] ${title} — refused (${why})`);
     ask.held = true;
+    refusedHeld = true;
+    openAsks.delete(key);
     activity.permission();
     answerPermission(ask, { outcome: { outcome: "cancelled" } });
-    if (!ask.askId) currentAsk = null;
   };
-  if (!turn) { answerPermission(ask, { outcome: { outcome: "cancelled" } }); currentAsk = null; return; }
+  if (!turn) { openAsks.delete(key); answerPermission(ask, { outcome: { outcome: "cancelled" } }); return; }
   if (denyPermissions) { refuseHold("--deny"); return; }
 
   activity.pauseWorking();
@@ -566,6 +578,7 @@ async function handlePermissionRequest(msg) {
     occurredAt: new Date().toISOString(),
   });
   if (turn.finished) {
+    openAsks.delete(key);
     if (ask.askId) { ask.withdrawn = true; await withdrawPermission(ask.askId, turn.cancelSent ? "turn_cancelled" : "turn_ended"); }
     answerPermission(ask, { outcome: { outcome: "cancelled" } });
     return;
@@ -574,16 +587,14 @@ async function handlePermissionRequest(msg) {
   if (submitted.kind === "refuse-hold") { refuseHold(submitted.reason); return; }
   if (submitted.kind === "cancel") {
     answerPermission(ask, { outcome: { outcome: "cancelled" } });
-    activity.permissionSettled();
-    currentAsk = null;
+    settleAsk(ask);
     return;
   }
   if (submitted.kind === "permit") {
     const optionId = submitted.optionId ?? selectPermitOption(options);
     if (!optionId) { refuseHold("no allow option"); return; }
     answerPermission(ask, { outcome: { outcome: "selected", optionId } });
-    activity.permissionSettled();
-    currentAsk = null;
+    settleAsk(ask, { resolved: false });
     return;
   }
 
@@ -591,14 +602,13 @@ async function handlePermissionRequest(msg) {
   // until they answer or the turn ends, and deliver once.
   ask.askId = submitted.askId;
   activity.awaitingPerson();
-  const read = await readPermission(ask.askId, turn);
-  if (turn.finished) {
-    // The turn-end path (pump) owns the withdraw and the cancelled answer.
-    return;
-  }
+  const read = await readPermission(ask, turn);
+  if (turn.finished || !openAsks.has(key)) return;
   if (read.kind === "selected") {
     answerPermission(ask, { outcome: { outcome: "selected", optionId: read.optionId } });
-    activity.permissionResolved(ask.askId);
+    // Keep the answered ask until turn end: the contract withdraws every open
+    // request when the turn ends, and a later answer can't be delivered.
+    settleAsk(ask, { resolved: true, preserve: true });
     queueSaid(read.said);
     return;
   }
@@ -606,15 +616,17 @@ async function handlePermissionRequest(msg) {
     const optionId = read.optionId ?? selectPermitOption(options);
     if (!optionId) { refuseHold("no allow option"); return; }
     answerPermission(ask, { outcome: { outcome: "selected", optionId } });
-    activity.permissionResolved(ask.askId);
+    // The ask may still be open on OpenRig's side; keep it for the turn-end
+    // withdraw while clearing attention for the permit already delivered.
+    settleAsk(ask, { resolved: true, preserve: true });
     queueSaid(read.said);
     return;
   }
   if (read.kind === "refuse-hold") { refuseHold(read.reason); return; }
-  // refused / withdrawn / stale / cancel: no person is still waiting.
+  // refused / withdrawn / stale / cancel: no person is still waiting on this one.
   if (read.reason === "withdrawn" || read.reason === "stale") ask.withdrawn = true;
   answerPermission(ask, { outcome: { outcome: "cancelled" } });
-  activity.permissionSettled();
+  settleAsk(ask);
   queueSaid(read.said);
 }
 
@@ -656,7 +668,7 @@ let escapeBuffer = "";
 let promptQueued = false;
 let turnCount = 0;
 const queue = [];
-let currentAsk = null; // { requestId, askId, answered, withdrawn, turn }
+// open permission asks are tracked in bin's answered-permissions section
 
 function handleInputChunk(chunk) {
   for (const char of String(chunk)) {
@@ -712,7 +724,7 @@ function cancelTurn() {
   send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
   // An ask waiting on a person is withdrawn now: its answer unblocks the agent
   // so session/cancel can settle the turn, and no person is still waiting.
-  void withdrawCurrentAsk("turn_cancelled");
+  void withdrawAllAsks("turn_cancelled");
   line("[dsh-seat] cancel requested");
 }
 
@@ -721,6 +733,7 @@ async function pump() {
   const text = queue.shift();
   if (text === undefined) return;
   promptQueued = true;
+  refusedHeld = false;
   const turn = activity.beginTurn(String(++turnCount));
   turn.finished = false;
   turn.waiters = new Set();
@@ -743,7 +756,7 @@ async function pump() {
     turn.finished = true;
     for (const waiter of turn.waiters) { try { waiter(); } catch { /* best effort */ } }
     turn.waiters.clear();
-    await withdrawCurrentAsk(turn.cancelSent ? "turn_cancelled" : "turn_ended");
+    await withdrawAllAsks(turn.cancelSent ? "turn_cancelled" : "turn_ended");
     if (failed) activity.abandonTurn(); else activity.endTurn(stopReason);
     promptQueued = false;
     // The next queued prompt arms a new turn (which stops the beat); an empty
@@ -864,7 +877,7 @@ function killAgent(signal) {
 async function stop(code, why) {
   if (shuttingDown) return;
   shuttingDown = true;
-  await withdrawCurrentAsk("exited");
+  await withdrawAllAsks("exited");
   activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);

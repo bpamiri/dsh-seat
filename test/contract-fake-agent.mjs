@@ -10,6 +10,8 @@ const log = arg("--log");
 const envLog = arg("--env-log");
 const marker = arg("--marker");
 const mode = arg("--mode") ?? "fresh";
+const twoAsks = process.argv.includes("--two-asks");
+const twoAsksExit = process.argv.includes("--two-asks-exit");
 const MODEL_OPTIONS = [{
   id: "model", name: "Model", type: "select",
   currentValue: "[\"deepseek-official\",\"deepseek-v4-flash\"]",
@@ -28,6 +30,7 @@ if (marker) writeFileSync(marker, "started");
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
 const fail = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const answers = new Map();
 let nextId = 900;
 function ask(method, params) {
@@ -53,6 +56,33 @@ async function handle(msg) {
     case "session/load": fail(msg.id, -32601, "Method not found: session/load"); break;
     case "session/set_config_option": reply(msg.id, {}); break;
     case "session/prompt":
+      if (twoAsks || twoAsksExit) {
+        // Real dsh can have two approvals outstanding (parallel tool calls).
+        ask("session/request_permission", {
+          sessionId: "fake-new",
+          toolCall: { toolCallId: "call-1", title: "Ask one", kind: "edit" },
+          options: [
+            { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+            { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+          ],
+        });
+        const second = ask("session/request_permission", {
+          sessionId: "fake-new",
+          toolCall: { toolCallId: "call-2", title: "Ask two", kind: "edit" },
+          options: [
+            { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+            { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+          ],
+        });
+        if (twoAsksExit) {
+          setTimeout(() => exit(3, "exit while two asks wait"), 1000);
+        } else {
+          await Promise.race([second, sleep(2000)]);
+          await sleep(7000);
+          reply(msg.id, { stopReason: "end_turn" });
+        }
+        return;
+      }
       if (mode === "permission") {
         const answer = await ask("session/request_permission", {
           sessionId: "fake-new",

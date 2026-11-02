@@ -631,3 +631,114 @@ test("permissions: a 0.7.6/0.7.7 daemon's 404 permits with allow_once and posts 
   assert.equal(hooks.some((post) => post.hookEvent === "Notification" && post.subtype === "permission_prompt"), false,
     "a permit must not post permission_prompt");
 });
+
+// ── concurrent permission asks: aggregate attention, all withdrawals ────────
+async function twoAskRun(t, { exitMode = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-two-asks-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  const submits = [];
+  const withdraws = [];
+  const byRequest = new Map();
+  const byAsk = new Map();
+  let seq = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      const url = new URL(req.url, "http://stand-in");
+      if (req.method === "POST" && url.pathname === "/api/activity/hooks") {
+        hooks.push({ ...body, receivedAt: Date.now() });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
+        submits.push({ ...body, at: Date.now() });
+        const key = String(body?.requestId);
+        let ask = byRequest.get(key);
+        if (!ask) {
+          ask = { askId: `ask-${++seq}`, requestId: key, reason: null, waiters: [] };
+          byRequest.set(key, ask);
+          byAsk.set(ask.askId, ask);
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, askId: ask.askId, created: true }));
+        return;
+      }
+      const withdraw = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)\/withdraw$/);
+      if (req.method === "POST" && withdraw) {
+        const ask = byAsk.get(decodeURIComponent(withdraw[1]));
+        if (ask) { ask.reason = body?.reason; for (const w of ask.waiters.splice(0)) w(ask); }
+        withdraws.push({ askId: decodeURIComponent(withdraw[1]), reason: body?.reason, at: Date.now() });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+        return;
+      }
+      const read = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)$/);
+      if (req.method === "GET" && read) {
+        const ask = byAsk.get(decodeURIComponent(read[1]));
+        const answer = () => {
+          if (ask?.reason) {
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, state: "withdrawn" }));
+            return;
+          }
+          if (ask?.askId === "ask-2") {
+            res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, state: "answered", optionId: "allow-once" }));
+            return;
+          }
+          ask?.waiters.push(answer);
+        };
+        if (ask?.askId === "ask-2") setTimeout(answer, 150);
+        else answer();
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, code: "not_found" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} ${exitMode ? "--two-asks-exit" : "--two-asks"}`], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "two-token", OPENRIG_SESSION_NAME: "two@rig",
+      OPENRIG_NODE_ID: "node-two", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-two",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "two-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  return { dir, log, record, hooks, submits, withdraws, child, childOut: () => childOut };
+}
+
+test("concurrent asks: no beat while any ask is open, and both withdrawn at turn end", async (t) => {
+  const run = await twoAskRun(t);
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  const secondSubmitAt = run.submits[1].at;
+  // One ask's allow answer reaches the agent; the other is still pending.
+  const answered = await waitFor(() => lines(run.log).find((entry) => (entry.id === 900 || entry.id === 901) && entry.result), 6000);
+  assert.ok(answered, "neither concurrent ask was answered");
+  await new Promise((resolve) => setTimeout(resolve, 5500)); // > one 5 s beat interval
+  const beats = run.hooks.filter((post) => post.hookEvent === "active" && post.subtype === "liveness"
+    && post.receivedAt > secondSubmitAt);
+  assert.equal(beats.length, 0, `a beat ran while ask-1 was still pending: ${JSON.stringify(beats)}`);
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "end_turn"), 12000), "no Stop/end_turn");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 4000), "not every open ask was withdrawn");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "turn_ended"), JSON.stringify(run.withdraws));
+  assert.equal(run.hooks.some((post) => post.subtype === "permission_prompt"), false);
+});
+
+test("concurrent asks: agent exit withdraws every open ask as exited", async (t) => {
+  const run = await twoAskRun(t, { exitMode: true });
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 6000), "not every open ask was withdrawn on exit");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "exited"), JSON.stringify(run.withdraws));
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "dsh_exited"), 4000), "no Stop/dsh_exited");
+  assert.equal(run.hooks.filter((post) => post.hookEvent === "active" && post.subtype === "liveness").length, 0);
+});

@@ -237,15 +237,11 @@
       "status": "pass",
       "checks": [
         {
-          "name": "unreachable: the runner opens its conversation",
-          "ok": true
-        },
-        {
           "name": "404: the runner opens its conversation",
           "ok": true
         },
         {
-          "name": "unreachable: the agent's permission request is sent",
+          "name": "unreachable: the runner opens its conversation",
           "ok": true
         },
         {
@@ -265,31 +261,15 @@
           "ok": true
         },
         {
+          "name": "unreachable: the agent's permission request is sent",
+          "ok": true
+        },
+        {
           "name": "denied_by_seat: the agent's permission request is sent",
           "ok": true
         },
         {
           "name": "denied_by_seat, then /abort: the agent's permission request is sent",
-          "ok": true
-        },
-        {
-          "name": "denied_by_seat, then /abort: the request is answered, not left pending",
-          "ok": true
-        },
-        {
-          "name": "denied_by_seat, then /abort: it's answered at once (within 2 s)",
-          "ok": true
-        },
-        {
-          "name": "denied_by_seat, then /abort: the answer is a refusal, never an allow option",
-          "ok": true
-        },
-        {
-          "name": "denied_by_seat, then /abort: Notification/permission_prompt is posted",
-          "ok": true
-        },
-        {
-          "name": "denied_by_seat, then /abort: /abort sends session/cancel",
           "ok": true
         },
         {
@@ -334,6 +314,26 @@
         },
         {
           "name": "denied_by_seat: what was asked is shown in the pane",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the request is answered, not left pending",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: it's answered at once (within 2 s)",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: the answer is a refusal, never an allow option",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: /abort sends session/cancel",
           "ok": true
         },
         {
@@ -492,10 +492,6 @@
           "ok": true
         },
         {
-          "name": "withdrawn ask: the agent gets cancelled",
-          "ok": true
-        },
-        {
           "name": "permitted at read: the agent gets its allow_once option",
           "ok": true
         },
@@ -516,23 +512,15 @@
           "ok": true
         },
         {
+          "name": "withdrawn ask: the agent gets cancelled",
+          "ok": true
+        },
+        {
           "name": "stale_generation: nothing is held",
           "ok": true
         },
         {
           "name": "activity_grant_stale read: nothing is held",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: it's delivered once",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: the turn's end is reported as usual",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: there's no ask to read",
           "ok": true
         },
         {
@@ -560,18 +548,6 @@
           "ok": true
         },
         {
-          "name": "unreachable read: it's delivered once",
-          "ok": true
-        },
-        {
-          "name": "unreachable read: the turn's end is reported as usual",
-          "ok": true
-        },
-        {
-          "name": "unreachable read: the ask is still withdrawn at the turn's end",
-          "ok": true
-        },
-        {
           "name": "unlisted read status (500): it's delivered once",
           "ok": true
         },
@@ -584,7 +560,27 @@
           "ok": true
         },
         {
-          "name": "withdrawn ask: nothing is held",
+          "name": "permitted at submit: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: there's no ask to read",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "unreachable read: the ask is still withdrawn at the turn's end",
           "ok": true
         },
         {
@@ -593,6 +589,10 @@
         },
         {
           "name": "stale ask: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: nothing is held",
           "ok": true
         },
         {

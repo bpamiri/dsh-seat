@@ -11,7 +11,7 @@ passes_model: true
 resume: true
 limits:
   - permissions default to permit when no person can be asked (no registered/default person, unreachable or older OpenRig answering 404): the agent gets allow_once, else allow_always; --deny restores refuse-and-hold
-  - when a person is asked the runner reads the ask (<=25 s per read) until the turn ends; a waiting ask is never timed out into a grant, and is withdrawn on cancel/end/exit
+  - when a person is asked the runner reads the ask (<=25 s per read, 30 s client bound) until the turn ends; a waiting ask is never timed out into a grant, a read with no answer permits, and all open asks (including concurrent ones) are withdrawn on cancel/end/exit
   - denied_by_seat, options_unsupported, --deny, or an agent with no allow option refuse and hold attention until the next accepted prompt
   - a prompt whose whole text is /abort cannot be sent; Ctrl-C inside a paste also aborts; non-TTY input is line by line and not binary-safe
   - fork is unsupported
@@ -19,7 +19,7 @@ limits:
   - the declared model is matched by provider/model (provider exact or a substring, unique model id), a unique bare id, or an exact opaque selector; an unmappable value is reported and dsh's default remains; it is applied on fresh launches and resumes
   - a per-seat writable DSH_HOME is provisioned when unset (from the operator's acp profile, with session-log and plugin-inventory uploads off); an explicit DSH_HOME=$HOME/.dsh is refused; .credentials.yaml is never copied or linked
   - the agent child gets the baseline shell, OpenRig identity/routing variables, its own DSH_HOME, dsh's telemetry choice (DSH_TELEMETRY_DISABLED=1 unless the operator chose one), and the declared provider's key when set; the hook token and runner-only launch variables are not inherited
-  - activity is turn boundaries, tool/message working posts, a working beat (active/liveness every 5 s, livenessSeconds 15) and an idle heartbeat; no beat while a person is asked, while attention is held, after Stop or on exit
+  - activity is turn boundaries, tool/message working posts, a working beat (active/liveness every 5 s, livenessSeconds 15) and an idle heartbeat; no beat while any person is asked (concurrent asks included), while attention is held, after Stop or on exit
   - on a 0.7.6/0.7.7 daemon the beat hook event is unknown (harmless) and the permission routes answer 404, taking the permit path
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed

@@ -66,3 +66,66 @@ export function classifyRead(status, body) {
   // deferred, a 500, an unknown state, or no answer at all: no one can be asked.
   return { kind: "permit", optionId: null, reason: code ?? state ?? `status ${status}` };
 }
+
+export class PermissionTimeoutError extends Error {
+  constructor(what, timeoutMs) {
+    super(`${what} timed out after ${timeoutMs} ms`);
+    this.name = "PermissionTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * The HTTP side of section 7. `readTimeoutMs` bounds one long-poll read; the
+ * caller treats a timeout as "nobody can be asked" and permits.
+ */
+export function createPermissionTransport({
+  base, token, fetchImpl = fetch, readTimeoutMs = 30_000, submitTimeoutMs = 5_000, withdrawTimeoutMs = 2_000,
+}) {
+  const baseUrl = String(base).replace(/\/$/, "");
+  const headers = () => ({ "content-type": "application/json", authorization: `Bearer ${token}` });
+  async function call(method, path, { body, timeoutMs, signal } = {}) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const forward = () => controller.abort();
+    signal?.addEventListener("abort", forward, { once: true });
+    try {
+      return await fetchImpl(`${baseUrl}${path}`, {
+        method,
+        headers: headers(),
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut) throw new PermissionTimeoutError(`${method} ${path}`, timeoutMs);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+    }
+  }
+  return {
+    async submit(body) {
+      const res = await call("POST", "/api/activity/permission-requests", { body, timeoutMs: submitTimeoutMs });
+      let json = null;
+      try { json = await res.json(); } catch { /* status decides */ }
+      return classifySubmit(res.status, json);
+    },
+    async readOnce(askId, { signal } = {}) {
+      const res = await call("GET", `/api/activity/permission-requests/${encodeURIComponent(askId)}?waitSeconds=25`, {
+        timeoutMs: readTimeoutMs, signal,
+      });
+      let json = null;
+      try { json = await res.json(); } catch { /* status decides */ }
+      return classifyRead(res.status, json);
+    },
+    async withdraw(askId, reason) {
+      try {
+        await call("POST", `/api/activity/permission-requests/${encodeURIComponent(askId)}/withdraw`, {
+          body: { reason }, timeoutMs: withdrawTimeoutMs,
+        });
+      } catch { /* best effort */ }
+    },
+  };
+}
