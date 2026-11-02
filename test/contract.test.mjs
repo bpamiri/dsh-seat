@@ -276,6 +276,9 @@ function activityFixture({ pending = () => false, enabled = () => true } = {}) {
     post: (hookEvent, subtype, extra = {}) => { posts.push({ hookEvent, subtype, ...extra }); },
     hasPendingPost: pending,
     enabled,
+    // These tests predate the working beat; keep it out of their expected
+    // sequences and cover it explicitly below.
+    workingBeatMs: 1_000_000,
   });
   return { posts, reporter };
 }
@@ -481,4 +484,150 @@ test("entrypoint guard: a symlinked invocation is started directly; an import is
   assert.equal(isEntrypoint(process.argv[1], moduleUrl), false, "importing the module must not run main");
   assert.equal(isEntrypoint(undefined, moduleUrl), false);
   assert.equal(isEntrypoint(join(dir, "missing"), moduleUrl), false, "a missing path is not the entrypoint");
+});
+
+// ── working beat (§4, 0.7.9) ────────────────────────────────────────────────
+function workingFixture({ workingBeatMs = 5_000, workingLivenessSeconds = 15 } = {}) {
+  const posts = [];
+  const reporter = createActivityReporter({
+    post: (hookEvent, subtype, extra = {}) => { posts.push({ hookEvent, subtype, ...extra }); },
+    workingBeatMs,
+    workingLivenessSeconds,
+  });
+  return { posts, reporter };
+}
+
+test("working beat: posts active/liveness for the open turn, before its Stop, and stops after it", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const { posts, reporter } = workingFixture();
+  reporter.beginTurn("7");
+  assert.equal(reporter.workingBeatArmed, true);
+  t.mock.timers.tick(4_999);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted"], "no beat before the interval");
+  t.mock.timers.tick(1);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "active/liveness"]);
+  t.mock.timers.tick(5_000);
+  assert.equal(posts.filter((post) => post.subtype === "liveness").length, 2);
+  assert.ok(posts.every((post) => post.turnId === "7"), "every post names the open turn");
+  assert.ok(posts.filter((post) => post.subtype === "liveness").every((post) => post.livenessSeconds === 15));
+  reporter.endTurn("end_turn");
+  assert.equal(reporter.workingBeatArmed, false);
+  t.mock.timers.tick(20_000);
+  assert.equal(posts.filter((post) => post.subtype === "liveness").length, 2, "no beat after Stop");
+  assert.deepEqual(kinds(posts).slice(-1), ["Stop/end_turn"]);
+});
+
+test("working beat: stops while a person is asked, posts permission_resolved first after the answer", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const { posts, reporter } = workingFixture();
+  reporter.beginTurn("3");
+  t.mock.timers.tick(5_000);
+  assert.deepEqual(kinds(posts), ["UserPromptSubmit/accepted", "active/liveness"]);
+  reporter.pauseWorking();
+  reporter.awaitingPerson();
+  t.mock.timers.tick(20_000);
+  assert.equal(posts.filter((post) => post.hookEvent === "active").length, 1, "no beat while the ask waits");
+  reporter.permissionResolved("ask-9");
+  assert.deepEqual(kinds(posts).slice(-1), ["active/permission_resolved"]);
+  assert.equal(posts.at(-1).askId, "ask-9");
+  t.mock.timers.tick(5_000);
+  assert.deepEqual(kinds(posts).slice(-1), ["active/liveness"], "the beat resumes after the answer");
+  reporter.endTurn("end_turn");
+});
+
+test("working beat: stops on permission attention, agent exit and shutdown", (t) => {
+  t.mock.timers.enable({ apis: MOCK_APIS });
+  const first = workingFixture();
+  first.reporter.beginTurn("1");
+  first.reporter.permission();
+  t.mock.timers.tick(30_000);
+  assert.equal(first.posts.filter((post) => post.subtype === "liveness").length, 0);
+
+  const second = workingFixture();
+  second.reporter.beginTurn("2");
+  second.reporter.agentExited();
+  t.mock.timers.tick(30_000);
+  assert.equal(second.posts.filter((post) => post.subtype === "liveness").length, 0);
+
+  const third = workingFixture();
+  third.reporter.beginTurn("3");
+  third.reporter.shutdown();
+  t.mock.timers.tick(30_000);
+  assert.equal(third.posts.filter((post) => post.subtype === "liveness").length, 0);
+  assert.equal(third.reporter.workingBeatArmed, false);
+});
+
+test("permissions: --deny refuses immediately, posts permission_prompt and submits nothing", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-deny-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  const submits = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      if (req.method === "POST" && req.url === "/api/activity/hooks") { hooks.push(body); res.writeHead(200).end("{}"); return; }
+      if (req.method === "POST" && req.url === "/api/activity/permission-requests") { submits.push(body); res.writeHead(404).end("{}"); return; }
+      res.writeHead(404).end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --mode permission`, "--deny"], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "perm-token", OPENRIG_SESSION_NAME: "perm@rig",
+      OPENRIG_NODE_ID: "node-perm", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-perm",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "perm-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  await waitFor(() => json(record));
+  child.stdin.write("edit the notes\n");
+  const answer = await waitFor(() => lines(log).find((entry) => entry.answer)?.answer);
+  assert.equal(answer?.outcome?.outcome, "cancelled");
+  assert.equal(submits.length, 0, "the --deny posture must not submit a permission request");
+  assert.ok(await waitFor(() => hooks.find((post) => post.hookEvent === "Notification" && post.subtype === "permission_prompt")), "permission_prompt not posted");
+});
+
+test("permissions: a 0.7.6/0.7.7 daemon's 404 permits with allow_once and posts no permission_prompt", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-404-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const hooks = [];
+  let submits = 0;
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      if (req.method === "POST" && req.url === "/api/activity/hooks") { hooks.push(body); res.writeHead(200).end("{}"); return; }
+      if (req.method === "POST" && req.url === "/api/activity/permission-requests") { submits++; res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, code: "not_found" })); return; }
+      res.writeHead(404).end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --mode permission`], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "perm-token", OPENRIG_SESSION_NAME: "perm@rig",
+      OPENRIG_NODE_ID: "node-perm", OPENRIG_RUNTIME: "dsh", OPENRIG_OCCUPANT_GENERATION: "gen-perm",
+      OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "perm-attempt",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  t.after(() => { child.kill("SIGKILL"); server.close(); rmSync(dir, { recursive: true, force: true }); });
+  await waitFor(() => json(record));
+  child.stdin.write("edit the notes\n");
+  const answer = await waitFor(() => lines(log).find((entry) => entry.answer)?.answer);
+  assert.deepEqual(answer, { outcome: { outcome: "selected", optionId: "allow-once" } });
+  assert.equal(submits, 1);
+  assert.equal(hooks.some((post) => post.hookEvent === "Notification" && post.subtype === "permission_prompt"), false,
+    "a permit must not post permission_prompt");
 });
