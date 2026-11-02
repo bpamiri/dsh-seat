@@ -468,11 +468,15 @@
           "ok": true
         },
         {
-          "name": "activity_grant_pending: the agent gets its allow_once option",
+          "name": "activity_grant_revoked: the agent gets its allow_once option",
           "ok": true
         },
         {
-          "name": "activity_grant_revoked: the agent gets its allow_once option",
+          "name": "stale_generation: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_pending: the agent gets its allow_once option",
           "ok": true
         },
         {
@@ -484,11 +488,11 @@
           "ok": true
         },
         {
-          "name": "stale_generation: the agent gets cancelled",
+          "name": "activity_grant_stale read: the agent gets cancelled",
           "ok": true
         },
         {
-          "name": "activity_grant_stale read: the agent gets cancelled",
+          "name": "withdrawn ask: the agent gets cancelled",
           "ok": true
         },
         {
@@ -512,15 +516,23 @@
           "ok": true
         },
         {
-          "name": "withdrawn ask: the agent gets cancelled",
-          "ok": true
-        },
-        {
           "name": "stale_generation: nothing is held",
           "ok": true
         },
         {
           "name": "activity_grant_stale read: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: it's delivered once",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: the turn's end is reported as usual",
+          "ok": true
+        },
+        {
+          "name": "permitted at submit: there's no ask to read",
           "ok": true
         },
         {
@@ -540,35 +552,23 @@
           "ok": true
         },
         {
+          "name": "refused read (said_no): nothing is held",
+          "ok": true
+        },
+        {
+          "name": "stale ask: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: nothing is held",
+          "ok": true
+        },
+        {
           "name": "activity_grant_revoked: it's delivered once",
           "ok": true
         },
         {
           "name": "activity_grant_revoked: the turn's end is reported as usual",
-          "ok": true
-        },
-        {
-          "name": "unlisted read status (500): it's delivered once",
-          "ok": true
-        },
-        {
-          "name": "unlisted read status (500): the turn's end is reported as usual",
-          "ok": true
-        },
-        {
-          "name": "unlisted read status (500): the ask is still withdrawn at the turn's end",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: it's delivered once",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: the turn's end is reported as usual",
-          "ok": true
-        },
-        {
-          "name": "permitted at submit: there's no ask to read",
           "ok": true
         },
         {
@@ -584,15 +584,15 @@
           "ok": true
         },
         {
-          "name": "refused read (said_no): nothing is held",
+          "name": "unlisted read status (500): it's delivered once",
           "ok": true
         },
         {
-          "name": "stale ask: nothing is held",
+          "name": "unlisted read status (500): the turn's end is reported as usual",
           "ok": true
         },
         {
-          "name": "withdrawn ask: nothing is held",
+          "name": "unlisted read status (500): the ask is still withdrawn at the turn's end",
           "ok": true
         },
         {

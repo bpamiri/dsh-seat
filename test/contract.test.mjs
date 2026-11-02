@@ -729,6 +729,28 @@ test("concurrent asks: no beat while any ask is open, and both withdrawn at turn
   assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
   assert.ok(run.withdraws.every((w) => w.reason === "turn_ended"), JSON.stringify(run.withdraws));
   assert.equal(run.hooks.some((post) => post.subtype === "permission_prompt"), false);
+  const answers = lines(run.log).filter((entry) => (entry.id === 900 || entry.id === 901) && entry.result);
+  const answerIds = answers.map((entry) => entry.id);
+  assert.equal(new Set(answerIds).size, answerIds.length, `a request was answered more than once: ${JSON.stringify(answerIds)}`);
+  assert.equal(answers.filter((entry) => entry.result?.outcome?.outcome === "selected").length, 1, "exactly one selected option");
+});
+
+test("concurrent asks: /abort withdraws every open ask as turn_cancelled", async (t) => {
+  const run = await twoAskRun(t);
+  await waitFor(() => json(run.record));
+  run.child.stdin.write("edit the notes\n");
+  assert.ok(await waitFor(() => run.submits.length >= 2), "both requests submitted");
+  assert.ok(await waitFor(() => lines(run.log).find((entry) => (entry.id === 900 || entry.id === 901) && entry.result), 6000), "no ask answered");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  run.child.stdin.write("/abort\n");
+  assert.ok(await waitFor(() => run.withdraws.length >= 2, 6000), "not every open ask was withdrawn on abort");
+  assert.deepEqual(run.withdraws.map((w) => w.askId).sort(), ["ask-1", "ask-2"]);
+  assert.ok(run.withdraws.every((w) => w.reason === "turn_cancelled"), JSON.stringify(run.withdraws));
+  assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "cancelled"), 6000), "no Stop/cancelled");
+  assert.equal(run.hooks.some((post) => post.subtype === "permission_prompt"), false);
+  const answers = lines(run.log).filter((entry) => (entry.id === 900 || entry.id === 901) && entry.result);
+  const answerIds = answers.map((entry) => entry.id);
+  assert.equal(new Set(answerIds).size, answerIds.length, `a request was answered more than once: ${JSON.stringify(answerIds)}`);
 });
 
 test("concurrent asks: agent exit withdraws every open ask as exited", async (t) => {

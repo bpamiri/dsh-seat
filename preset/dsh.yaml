@@ -20,6 +20,6 @@ limits:
   - a per-seat writable DSH_HOME is provisioned when unset (from the operator's acp profile, with session-log and plugin-inventory uploads off); an explicit DSH_HOME=$HOME/.dsh is refused; .credentials.yaml is never copied or linked
   - the agent child gets the baseline shell, OpenRig identity/routing variables, its own DSH_HOME, dsh's telemetry choice (DSH_TELEMETRY_DISABLED=1 unless the operator chose one), and the declared provider's key when set; the hook token and runner-only launch variables are not inherited
   - activity is turn boundaries, tool/message working posts, a working beat (active/liveness every 5 s, livenessSeconds 15) and an idle heartbeat; no beat while any person is asked (concurrent asks included), while attention is held, after Stop or on exit
-  - on a 0.7.6/0.7.7 daemon the beat hook event is unknown (harmless) and the permission routes answer 404, taking the permit path
+  - on a 0.7.6/0.7.7 daemon the working beat is harmless: that daemon already maps active to running (not an unknown event), and the permission routes answer 404, taking the permit path
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed

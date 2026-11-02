@@ -32,6 +32,7 @@ const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
 const fail = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const answers = new Map();
+let cancelTurn = null;
 let nextId = 900;
 function ask(method, params) {
   const id = nextId++;
@@ -77,9 +78,14 @@ async function handle(msg) {
         if (twoAsksExit) {
           setTimeout(() => exit(3, "exit while two asks wait"), 1000);
         } else {
+          // Arm cancellation before waiting for an answer: /abort can arrive
+          // while either ask is still pending.
+          const cancelled = new Promise((resolve) => {
+            const timer = setTimeout(() => { cancelTurn = null; resolve(false); }, 7000);
+            cancelTurn = () => { clearTimeout(timer); cancelTurn = null; resolve(true); };
+          });
           await Promise.race([second, sleep(2000)]);
-          await sleep(7000);
-          reply(msg.id, { stopReason: "end_turn" });
+          reply(msg.id, { stopReason: (await cancelled) ? "cancelled" : "end_turn" });
         }
         return;
       }
@@ -104,7 +110,7 @@ async function handle(msg) {
       }
       reply(msg.id, { stopReason: "end_turn" });
       break;
-    case "session/cancel": break;
+    case "session/cancel": cancelTurn?.(); break;
     default: if (msg.id !== undefined) fail(msg.id, -32601, `Method not found: ${msg.method}`);
   }
 }

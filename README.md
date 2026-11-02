@@ -33,8 +33,8 @@ Apache-2.0.
 
 Requirements: Node 22+, `dsh` with the `acp` profile installed and on `PATH`, OpenRig 0.7.6+ (the
 runner contract; answered permissions from 0.7.8, the working beat from 0.7.9), and tmux. On an
-older daemon the beat is an unknown hook event (harmless) and the permission routes answer 404,
-which takes the permit path.
+older daemon the beat is harmless — that daemon already maps `active` to running — and the
+permission routes answer 404, which takes the permit path.
 
 ```sh
 git clone https://github.com/bpamiri/dsh-seat.git
@@ -127,8 +127,9 @@ limits: ...   # see preset/dsh.yaml
   throttled to one `active` post per 10 s per turn; the working beat is `active/liveness` every
   5 s (`livenessSeconds: 15`) while a prompt is outstanding and the child is alive. Idle liveness
   is a `Stop` at turn end plus a `Stop/idle_heartbeat` every 60 s, both with `livenessSeconds: 60`.
-- On a 0.7.6/0.7.7 daemon the working beat is an unknown hook event (harmless) and the permission
-  routes answer 404, which takes the permit path. A 0.7.7 daemon was not available to run here.
+- On a 0.7.6/0.7.7 daemon the working beat is harmless: that daemon already maps `active` to
+  running (it is not an unknown event), and the permission routes answer 404, which takes the
+  permit path. A real 0.7.7 daemon was not available to run here.
 - Carrying a `turnId` does not make OpenRig reject a stale event; that is daemon-side work on
   OpenRig #43.
 - Stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup.
@@ -170,8 +171,10 @@ Result (the conformance JSON is in
 | 9 | `OPENRIG_FIRST_INPUT` exact bytes as the first prompt | pass |
 
 **13 pass, 0 fail, 0 skip, 2 advisory (both met) — exit status 0.** The updated checker added
-cases 3b, 4b and 4c and reworked case 4; the eleven cases it had before still pass. The exact
-command and machine-readable results are committed under `conformance/`.
+cases 3b, 4b and 4c and reworked case 4. The eleven original case IDs remain and pass under the
+updated checker; case 4 was reworked for the 0.7.8 permit default, and the old checker's case 4
+fails by design because it asserts refuse-by-default. The exact command and machine-readable
+results are committed under `conformance/`.
 
 ### Real dsh check
 

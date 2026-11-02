@@ -52,9 +52,11 @@ credentials or network are involved.
 
 Summary: **13 pass, 0 fail, 0 skip, 2 advisory (both met)**.
 
-The updated checker added cases 3b, 4b and 4c and reworked case 4; all eleven cases the previous
-checker had still pass. The checker's fake agent stands in for dsh and scripts the ask/permit
-routes; a real person answering, and a real 0.7.8/0.7.9 daemon, were not available here.
+The updated checker added cases 3b, 4b and 4c and reworked case 4. The eleven original case IDs
+remain and pass under the updated checker; case 4 was reworked for the 0.7.8 permit default, and
+the old checker's case 4 fails by design because it asserts refuse-by-default. The checker's fake
+agent stands in for dsh and scripts the ask/permit routes; a real person answering, and a real
+0.7.8/0.7.9 daemon, were not available here.
 
 ## Real dsh check (outside the checker)
 
