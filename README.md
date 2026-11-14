@@ -171,11 +171,11 @@ Result (the conformance JSON is in
 | 9 | `OPENRIG_FIRST_INPUT` exact bytes as the first prompt | pass |
 | 10 | Launch wrapper: the runner wraps its native child and scrubs the handoff env | skip (this preset declares no `launch_wrapper`; OpenRig passes no `OPENRIG_LAUNCH_WRAPPER`) |
 
-**13 pass, 0 fail, 1 skip, 2 advisory (both met) — exit status 0.** The 0.7.15 checker has 16 case
-ids. Case 10 is present and skipped, not passed: this preset does not declare `launch_wrapper`, so
-OpenRig passes no `OPENRIG_LAUNCH_WRAPPER` and the checker has nothing to exercise. dsh-seat does
-not implement the capability, and a member configured with a wrapper is refused at preflight
-(exit 2, no agent started). The exact command and machine-readable results are committed under
+**13 pass, 0 fail, 1 skip, 2 advisory (both met), 181 checks — exit status 0.** The 0.7.15 checker
+has 16 case ids. Case 10 is present and skipped, not passed: this preset does not declare
+`launch_wrapper`, so OpenRig passes no `OPENRIG_LAUNCH_WRAPPER` and the checker has nothing to
+exercise. dsh-seat does not implement the capability, and a member configured with a wrapper is
+refused at preflight (exit 2, no agent started). The exact command and machine-readable results are committed under
 `conformance/`.
 
 ### Real dsh check

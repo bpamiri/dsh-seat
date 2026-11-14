@@ -5,9 +5,11 @@ This directory records the result of OpenRig's official runner conformance check
 
 ## Checker
 
-From the checker shipped with OpenRig 0.7.15 (16 case ids). The run was made in a `node:22-alpine`
-container with tmux; this host denies tmux pane forks, so the host run is recorded separately and is
-not a runner result:
+From the checker shipped with OpenRig 0.7.15 (16 case ids). The run recorded here was made in a
+`node:22-alpine` container with tmux. A run on this macOS host is not a runner result and is not
+committed: this host denies tmux pane forks, so it failed at startup — exit 1, 15 fail / 1 skip over
+the 16 case ids, every case reporting `tmux couldn't start the runner: create window failed: fork
+failed: Operation not permitted`.
 
 - `docs/reference/runner-conformance/check-runner.mjs`
 - `docs/reference/runner-conformance/fake-acp-agent.mjs`
@@ -32,7 +34,8 @@ receiving agent or operator then decides with `rig seat decide-permission <ask> 
 The environment and DSH_HOME checks below predate the 0.7.15 run and still hold; the checker's fake
 agent stands in for dsh in every case here.
 
-Environment: macOS, Node v26.0.0, tmux 3.7c. The fake agent stands in for dsh, so no model,
+Environment of the recorded result: the `node:22-alpine` container with tmux (the macOS host
+attempt above produced no runner result). The fake agent stands in for dsh, so no model,
 credentials or network are involved.
 
 ## Result
