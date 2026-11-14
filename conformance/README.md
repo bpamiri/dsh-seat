@@ -5,8 +5,9 @@ This directory records the result of OpenRig's official runner conformance check
 
 ## Checker
 
-From OpenRig `upstream/main` at `2b929b3d7` — the updated checker from #2368/#2375, after
-0.7.7 (sections 4 and 7 changed; the old `ff604d943` copy is not used):
+From the checker shipped with OpenRig 0.7.15 (16 case ids). The run was made in a `node:22-alpine`
+container with tmux; this host denies tmux pane forks, so the host run is recorded separately and is
+not a runner result:
 
 - `docs/reference/runner-conformance/check-runner.mjs`
 - `docs/reference/runner-conformance/fake-acp-agent.mjs`
@@ -21,9 +22,15 @@ node check-runner.mjs \
   --name dsh --resume --first-input --json
 ```
 
-The `runner` field in `openrig-runner-conformance.json` shows the stable checkout path used for
-this run (`/Users/peter/GitHub/bpamiri/dsh-seat/bin/dsh-seat ...`). Everything else is the
-checker's verbatim output.
+The `runner` field in `openrig-runner-conformance.json` shows the path the run used
+(`/runner/bin/dsh-seat ...`, the container's checkout). Everything else is the checker's verbatim
+output: the file is the checker's `--json` result copied in unmodified, so regenerating it is a
+copy of a fresh run's output, not a hand edit.
+
+On 0.7.15 a person's answer is two steps: the answer is recorded and the ask stays pending, and the
+receiving agent or operator then decides with `rig seat decide-permission <ask> --option <id>`.
+The environment and DSH_HOME checks below predate the 0.7.15 run and still hold; the checker's fake
+agent stands in for dsh in every case here.
 
 Environment: macOS, Node v26.0.0, tmux 3.7c. The fake agent stands in for dsh, so no model,
 credentials or network are involved.
@@ -49,8 +56,12 @@ credentials or network are involved.
 | 7c shutdown (advisory, proposed section 9) | met — never counted |
 | 8 unknown request | pass |
 | 9 first input | pass |
+| 10 launch wrapper | skip — this preset declares no `launch_wrapper`, so OpenRig passes no `OPENRIG_LAUNCH_WRAPPER` |
 
-Summary: **13 pass, 0 fail, 0 skip, 2 advisory (both met)**.
+Summary: **13 pass, 0 fail, 1 skip, 2 advisory (both met)**, exit 0, 16 case ids, 181 checks.
+Case 10 is present and skipped, not dropped and not passed: dsh-seat does not implement the optional
+`launch_wrapper` capability and correctly does not declare it; a member configured with a wrapper is
+refused at preflight with exit 2 and no agent started.
 
 The updated checker added cases 3b, 4b and 4c and reworked case 4. The eleven original case IDs
 remain and pass under the updated checker; case 4 was reworked for the 0.7.8 permit default, and

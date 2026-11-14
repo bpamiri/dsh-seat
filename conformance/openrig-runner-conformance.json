@@ -1,7 +1,7 @@
 {
   "check": "openrig-runner-conformance",
   "format": 1,
-  "runner": "/Users/peter/GitHub/bpamiri/dsh-seat/bin/dsh-seat --agent-command {agent}",
+  "runner": "/runner/bin/dsh-seat --agent-command {agent}",
   "name": "dsh",
   "results": [
     {
@@ -333,10 +333,6 @@
           "ok": true
         },
         {
-          "name": "denied_by_seat, then /abort: /abort sends session/cancel",
-          "ok": true
-        },
-        {
           "name": "no allow option: the request is answered, not left pending",
           "ok": true
         },
@@ -350,6 +346,10 @@
         },
         {
           "name": "no allow option: Notification/permission_prompt is posted",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat, then /abort: /abort sends session/cancel",
           "ok": true
         },
         {
@@ -377,19 +377,19 @@
           "ok": true
         },
         {
-          "name": "denied_by_seat: no idle Stop or beat while holding that attention",
-          "ok": true
-        },
-        {
           "name": "no allow option: no idle Stop or beat while holding that attention",
           "ok": true
         },
         {
-          "name": "denied_by_seat: the next prompt is accepted as usual, which clears it",
+          "name": "denied_by_seat: no idle Stop or beat while holding that attention",
           "ok": true
         },
         {
           "name": "no allow option: the next prompt is accepted as usual, which clears it",
+          "ok": true
+        },
+        {
+          "name": "denied_by_seat: the next prompt is accepted as usual, which clears it",
           "ok": true
         }
       ]
@@ -460,6 +460,10 @@
           "ok": true
         },
         {
+          "name": "stale_generation: the agent gets cancelled",
+          "ok": true
+        },
+        {
           "name": "permitted at submit: the agent gets its allow_once option",
           "ok": true
         },
@@ -468,15 +472,11 @@
           "ok": true
         },
         {
-          "name": "activity_grant_revoked: the agent gets its allow_once option",
-          "ok": true
-        },
-        {
-          "name": "stale_generation: the agent gets cancelled",
-          "ok": true
-        },
-        {
           "name": "activity_grant_pending: the agent gets its allow_once option",
+          "ok": true
+        },
+        {
+          "name": "activity_grant_revoked: the agent gets its allow_once option",
           "ok": true
         },
         {
@@ -489,10 +489,6 @@
         },
         {
           "name": "activity_grant_stale read: the agent gets cancelled",
-          "ok": true
-        },
-        {
-          "name": "withdrawn ask: the agent gets cancelled",
           "ok": true
         },
         {
@@ -513,6 +509,10 @@
         },
         {
           "name": "stale ask: the agent gets cancelled",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: the agent gets cancelled",
           "ok": true
         },
         {
@@ -552,18 +552,6 @@
           "ok": true
         },
         {
-          "name": "refused read (said_no): nothing is held",
-          "ok": true
-        },
-        {
-          "name": "stale ask: nothing is held",
-          "ok": true
-        },
-        {
-          "name": "withdrawn ask: nothing is held",
-          "ok": true
-        },
-        {
           "name": "activity_grant_revoked: it's delivered once",
           "ok": true
         },
@@ -593,6 +581,18 @@
         },
         {
           "name": "unlisted read status (500): the ask is still withdrawn at the turn's end",
+          "ok": true
+        },
+        {
+          "name": "stale ask: nothing is held",
+          "ok": true
+        },
+        {
+          "name": "refused read (said_no): nothing is held",
+          "ok": true
+        },
+        {
+          "name": "withdrawn ask: nothing is held",
           "ok": true
         },
         {
@@ -766,7 +766,7 @@
           "ok": true
         },
         {
-          "name": "no idle Stop after the exit",
+          "name": "no idle report for the turn it died in",
           "ok": true
         }
       ]
@@ -836,12 +836,19 @@
           "ok": true
         }
       ]
+    },
+    {
+      "id": "10",
+      "title": "Launch wrapper: the runner wraps its native child and scrubs the handoff environment",
+      "status": "skip",
+      "checks": [],
+      "reason": "the preset doesn't declare launch_wrapper (--launch-wrapper): OpenRig passes no OPENRIG_LAUNCH_WRAPPER"
     }
   ],
   "summary": {
     "pass": 13,
     "fail": 0,
-    "skip": 0,
+    "skip": 1,
     "advisory": 2
   }
 }

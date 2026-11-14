@@ -140,7 +140,7 @@ limits: ...   # see preset/dsh.yaml
 
 The checker is OpenRig's official runner conformance check from
 [`docs/reference/runner-conformance/`](https://github.com/mvschwarz/openrig/tree/main/docs/reference/runner-conformance)
-(upstream/main at `2b929b3d7`; it changed in #2368 and #2375 after 0.7.7). It substitutes a fake ACP
+(the checker shipped with OpenRig 0.7.15, 16 case ids). It substitutes a fake ACP
 agent for dsh and drives the runner in a private tmux server:
 
 ```sh
@@ -169,12 +169,14 @@ Result (the conformance JSON is in
 | 7c | Closing the pane ends the agent (advisory, proposed section 9) | met (advisory; not counted) |
 | 8 | Unknown agent request → `-32601`, then prompts still work | pass |
 | 9 | `OPENRIG_FIRST_INPUT` exact bytes as the first prompt | pass |
+| 10 | Launch wrapper: the runner wraps its native child and scrubs the handoff env | skip (this preset declares no `launch_wrapper`; OpenRig passes no `OPENRIG_LAUNCH_WRAPPER`) |
 
-**13 pass, 0 fail, 0 skip, 2 advisory (both met) — exit status 0.** The updated checker added
-cases 3b, 4b and 4c and reworked case 4. The eleven original case IDs remain and pass under the
-updated checker; case 4 was reworked for the 0.7.8 permit default, and the old checker's case 4
-fails by design because it asserts refuse-by-default. The exact command and machine-readable
-results are committed under `conformance/`.
+**13 pass, 0 fail, 1 skip, 2 advisory (both met) — exit status 0.** The 0.7.15 checker has 16 case
+ids. Case 10 is present and skipped, not passed: this preset does not declare `launch_wrapper`, so
+OpenRig passes no `OPENRIG_LAUNCH_WRAPPER` and the checker has nothing to exercise. dsh-seat does
+not implement the capability, and a member configured with a wrapper is refused at preflight
+(exit 2, no agent started). The exact command and machine-readable results are committed under
+`conformance/`.
 
 ### Real dsh check
 
