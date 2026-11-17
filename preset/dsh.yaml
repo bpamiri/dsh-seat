@@ -22,5 +22,8 @@ limits:
   - activity is turn boundaries, tool/message working posts, a working beat (active/liveness every 5 s, livenessSeconds 15) and an idle heartbeat; no beat while any person is asked (concurrent asks included), while attention is held, after Stop or on exit
   - on a 0.7.6/0.7.7 daemon the working beat is harmless: that daemon already maps active to running (not an unknown event), and the permission routes answer 404, taking the permit path
   - launch_wrapper is not implemented and not declared; a member configured with a wrapper is refused at preflight (exit 2, no agent started)
+  - run-bound observations (v0.7.18) report the model the agent accepted and dsh's usage_update counts as runner-reported, not verified by OpenRig; context carries usedTokens and windowTokens when both are known, a bare usedTokens stays a count
+  - observations are sent only with a run-bound credential (OPENRIG_RUN_ID); without one nothing is reported, and the credential never reaches the agent
+  - observation refusal runner_observation_unverified is retried unchanged, runner_observation_unavailable stops reporting for the run, and any other refusal retires that report without retrying
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed

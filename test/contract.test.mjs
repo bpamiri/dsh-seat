@@ -90,7 +90,7 @@ test("agent env: identity/routing + telemetry off + DSH_HOME + provider key, nev
 
 function start(t, {
   mode = "fresh", model = null, resume = null, extraEnv = {}, dshHome = "explicit", home = process.env.HOME,
-  openrigHome = null, args = [],
+  openrigHome = null, args = [], agentArgs = [],
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "dsh-seat-contract-"));
   const log = join(dir, "agent.jsonl");
@@ -98,7 +98,7 @@ function start(t, {
   const started = join(dir, "agent-started");
   const record = join(dir, "launch", "record.json");
   const resolvedDshHome = dshHome === "explicit" ? join(dir, "dsh-home") : dshHome;
-  const child = spawn(process.execPath, [bin, ...args, "--agent-command", `${process.execPath} ${fake} --log ${log} --env-log ${envLog} --marker ${started} --mode ${mode}`], {
+  const child = spawn(process.execPath, [bin, ...args, "--agent-command", `${process.execPath} ${fake} --log ${log} --env-log ${envLog} --marker ${started} --mode ${mode} ${agentArgs.map((a) => `'${a}'`).join(" ")}`], {
     env: {
       PATH: process.env.PATH, HOME: home,
       ...(resolvedDshHome ? { DSH_HOME: resolvedDshHome } : {}),
@@ -763,4 +763,147 @@ test("concurrent asks: agent exit withdraws every open ask as exited", async (t)
   assert.ok(run.withdraws.every((w) => w.reason === "exited"), JSON.stringify(run.withdraws));
   assert.ok(await waitFor(() => run.hooks.find((post) => post.hookEvent === "Stop" && post.subtype === "dsh_exited"), 4000), "no Stop/dsh_exited");
   assert.equal(run.hooks.filter((post) => post.hookEvent === "active" && post.subtype === "liveness").length, 0);
+});
+
+// ── run-bound observations (§4, v0.7.18) ────────────────────────────────────
+// The runner posts an observation-only body to the same activity endpoint, from
+// the run-bound credential, separately from activity posts.
+async function observationRun(t, { model = "deepseek/deepseek-v4-flash", mode = "fresh", extraEnv = {}, args = [], agentArgs = [], runId = "run-obs-1" } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-observation-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const posts = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* recorded as null */ }
+      posts.push({ url: req.url, headers: req.headers, body });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const run = start(t, {
+    mode, model, args, agentArgs,
+    extraEnv: {
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "obs-token",
+      ...(runId ? { OPENRIG_RUN_ID: runId } : {}),
+      ...extraEnv,
+    },
+  });
+  t.after(() => { server.closeAllConnections?.(); server.close(); });
+  const observations = () => posts.filter((post) => post.body && !("hookEvent" in post.body) && "runId" in post.body);
+  return { run, posts, observations, dir, log, record };
+}
+
+test("observations: the model the agent reports is what gets reported, not the requested one", async (t) => {
+  // The agent accepts the write but says its current model is a different one:
+  // reporting the requested value would be a false claim about the model.
+  const { run, observations } = await observationRun(t, {
+    agentArgs: ["--reply-model", '["acme-normalised","acme-model-x"]'],
+  });
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  assert.ok(await waitFor(() => observations().some((post) => post.body.observations?.model)), "no model observation");
+  const bodies = observations().filter((post) => post.body.observations?.model);
+  assert.equal(bodies.length, 1, "one model report");
+  assert.deepEqual(bodies[0].body.observations.model, { id: "acme-normalised/acme-model-x" },
+    "the reply's currentValue is the accepted model");
+});
+
+test("observations: a config reply with no model value reports no model at all", async (t) => {
+  const { run, observations } = await observationRun(t, { agentArgs: ["--no-model-reply"] });
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(observations().filter((post) => post.body.observations?.model).length, 0,
+    "no model value in the reply means nothing honest to report");
+  assert.match(run.stdout(), /carries no model value/, "and the pane says why");
+});
+
+test("observations: the accepted model is reported as provider/model, separately from activity", async (t) => {
+  const { run, observations } = await observationRun(t);
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  assert.ok(await waitFor(() => observations().some((post) => post.body.observations?.model)), "no model observation");
+
+  const report = observations().find((post) => post.body.observations?.model);
+  const body = report.body;
+  assert.deepEqual(Object.keys(body).sort(), ["observations", "occurredAt", "runId", "sequence"]);
+  assert.equal("hookEvent" in body, false);
+  assert.equal("eventFamily" in body, false);
+  assert.equal(body.runId, "run-obs-1");
+  assert.equal(typeof body.sequence, "number");
+  assert.match(body.occurredAt, /^\d{4}-\d{2}-\d{2}T/);
+  // The selector the agent accepted, not the declared string and not a guess.
+  assert.deepEqual(body.observations.model, { id: "deepseek-official/deepseek-v4-flash" });
+  assert.equal(report.headers.authorization, "Bearer obs-token");
+  assert.equal(report.url, "/api/activity/hooks");
+});
+
+test("observations: a refused config write reports no model at all", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-seat-obs-refused-"));
+  const log = join(dir, "agent.jsonl");
+  const record = join(dir, "record.json");
+  const posts = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      let body = null;
+      try { body = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      posts.push({ body });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const child = spawn(process.execPath, [
+    bin, "--agent-command", `${process.execPath} ${fake} --log ${log} --mode fresh --refuse-config`,
+  ], {
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(dir, "dsh-home"),
+      OPENRIG_URL: base, OPENRIG_ACTIVITY_HOOK_TOKEN: "obs-token", OPENRIG_RUN_ID: "run-obs-refused",
+      OPENRIG_SESSION_NAME: "obs@rig", OPENRIG_NODE_ID: "node-obs", OPENRIG_RUNTIME: "dsh",
+      OPENRIG_OCCUPANT_GENERATION: "gen-obs", OPENRIG_LAUNCH_RESULT: record, OPENRIG_LAUNCH_ATTEMPT: "a",
+      OPENRIG_MODEL: "deepseek/deepseek-v4-flash",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  child.stderr.on("data", (chunk) => { out += chunk; });
+  t.after(() => { child.kill("SIGKILL"); server.closeAllConnections?.(); server.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  assert.ok(await waitFor(() => json(record)), `no launch record; pane: ${out}`);
+  assert.match(out, /could not apply the declared model/, "the refusal is surfaced in the pane");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const withModel = posts.filter((post) => post.body?.observations?.model);
+  assert.equal(withModel.length, 0, "a model the agent refused is never reported as applied");
+});
+
+test("observations: ACP usage_update is reported as usedTokens and windowTokens", async (t) => {
+  const { run, observations } = await observationRun(t, { mode: "usage" });
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  run.child.stdin.write("how big is the context?\n");
+  assert.ok(await waitFor(() => observations().some((post) => post.body.observations?.context)), "no context observation");
+  const context = observations().find((post) => post.body.observations?.context).body.observations.context;
+  assert.deepEqual(context, { usedTokens: 1000, windowTokens: 1000000 });
+  for (const post of observations()) {
+    assert.equal("hookEvent" in post.body, false, "context is reported as an observation, not activity");
+  }
+});
+
+test("observations: no run id means no observation posts (unbound install-token launch)", async (t) => {
+  const { run, observations } = await observationRun(t, { runId: null });
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(observations().length, 0, "an unbound launch reports no run-bound observations");
+});
+
+test("observations: the run credential never reaches the agent child", async (t) => {
+  const { run } = await observationRun(t);
+  assert.ok(await waitFor(() => json(run.record)), "no launch record");
+  const agentEnv = json(run.envLog);
+  assert.equal(agentEnv.OPENRIG_RUN_ID, undefined, "the run id stays in the runner process");
+  assert.equal(agentEnv.OPENRIG_ACTIVITY_HOOK_TOKEN, undefined, "the credential stays in the runner process");
 });

@@ -12,6 +12,11 @@ const marker = arg("--marker");
 const mode = arg("--mode") ?? "fresh";
 const twoAsks = process.argv.includes("--two-asks");
 const twoAsksExit = process.argv.includes("--two-asks-exit");
+const refuseConfig = process.argv.includes("--refuse-config");
+// The config reply's model currentValue: real dsh answers {configOptions} with the
+// model it now has, which is not necessarily the value the runner asked for.
+const replyModel = arg("--reply-model");   // e.g. '["acme-normalised","acme-model-x"]'
+const noModelReply = process.argv.includes("--no-model-reply");
 const MODEL_OPTIONS = [{
   id: "model", name: "Model", type: "select",
   currentValue: "[\"deepseek-official\",\"deepseek-v4-flash\"]",
@@ -55,7 +60,17 @@ async function handle(msg) {
       else reply(msg.id, { configOptions: MODEL_OPTIONS });
       break;
     case "session/load": fail(msg.id, -32601, "Method not found: session/load"); break;
-    case "session/set_config_option": reply(msg.id, {}); break;
+    case "session/set_config_option":
+      if (refuseConfig) { fail(msg.id, -32603, "fake agent: config refused"); break; }
+      if (noModelReply) { reply(msg.id, {}); break; }
+      reply(msg.id, {
+        configOptions: [{
+          id: "model",
+          currentValue: replyModel ?? JSON.stringify([msg.params?.value ? JSON.parse(msg.params.value)[0] : "deepseek-official",
+            msg.params?.value ? JSON.parse(msg.params.value)[1] : "deepseek-v4-flash"]),
+        }],
+      });
+      break;
     case "session/prompt":
       if (twoAsks || twoAsksExit) {
         // Real dsh can have two approvals outstanding (parallel tool calls).
@@ -99,6 +114,11 @@ async function handle(msg) {
           ],
         });
         record({ answer: answer.result ?? answer.error });
+      }
+      if (mode === "usage") {
+        // ACP reports the context it measures: used/size, here a 1,000,000 window.
+        send({ jsonrpc: "2.0", method: "session/update",
+          params: { sessionId: "fake-new", update: { sessionUpdate: "usage_update", used: 1000, size: 1000000 } } });
       }
       if (mode === "activity") {
         // One tool call and two message chunks (the runner's 10 s throttle must
