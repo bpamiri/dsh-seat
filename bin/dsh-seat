@@ -23,6 +23,7 @@ import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
 import { createPermissionTransport, selectPermitOption } from "../src/permission.mjs";
+import { createObservationReporter, modelIdFromSelector } from "../src/observation.mjs";
 
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
@@ -49,6 +50,9 @@ const OPENRIG = {
   generation: env("OPENRIG_OCCUPANT_GENERATION") || "",
   record: env("OPENRIG_LAUNCH_RESULT"),
   attempt: env("OPENRIG_LAUNCH_ATTEMPT") || "",
+  // The run-bound credential's run id (v0.7.18). Present only for a run-bound
+  // launch; without it the runner reports no observations.
+  runId: env("OPENRIG_RUN_ID"),
   resumeRef: env("OPENRIG_RESUME_REF"),
   firstInput: env("OPENRIG_FIRST_INPUT"),
   model: env("OPENRIG_MODEL"),
@@ -139,6 +143,14 @@ function resolveEndpoint() {
   return null;
 }
 endpoint = resolveEndpoint();
+// Run-bound observations (§4, v0.7.18): a separate report from activity. Inert
+// without a run id and token, so an unbound install-token launch reports nothing.
+const observations = createObservationReporter({
+  base: endpoint?.base,
+  token: endpoint?.token,
+  runId: OPENRIG.runId,
+  log: (message) => warn(message),
+});
 function post(hookEvent, subtype, extra = {}) {
   if (!endpoint?.token) return postChain;
   const body = {
@@ -394,6 +406,7 @@ function startAgent(dshHome) {
     pending.clear();
     // No idle heartbeat once the agent is gone; the exit Stop below is final.
     activity.agentExited();
+    observations.stop();
     if (!shuttingDown) {
       void (async () => {
         await withdrawAllAsks("exited");
@@ -644,6 +657,14 @@ function handleAgentNotification(msg) {
     const content = update.content;
     if (content?.type === "text" && typeof content.text === "string") pane(content.text);
     activity.messageChunk();
+  } else if (kind === "usage_update") {
+    // ACP reports the context ACP itself measures: used/size. Both are reported
+    // so occupancy is legitimate rather than inferred from a bare count.
+    const used = update.used;
+    const size = update.size;
+    if (typeof used === "number" && typeof size === "number" && size > 0) {
+      void observations.context({ usedTokens: used, windowTokens: size });
+    }
   } else if (kind === "tool_call" || kind === "tool_call_update") {
     const title = update.title ?? update.toolCallId ?? update.kind;
     if (title) line(`[tool] ${title}${update.status ? ` — ${update.status}` : ""}`);
@@ -736,6 +757,9 @@ async function pump() {
   refusedHeld = false;
   const turn = activity.beginTurn(String(++turnCount));
   turn.finished = false;
+  // Keep reported facts current on a long-lived seat: renew only when the last
+  // accepted report is older than the freshness window, never per chunk.
+  void observations.renewIfStale();
   turn.waiters = new Set();
   line(`you ▸ ${text.split("\n")[0].slice(0, 160)}${text.includes("\n") ? " …" : ""}`);
   let stopReason = "end_turn";
@@ -845,6 +869,10 @@ async function applyModel(configOptions) {
   try {
     await request("session/set_config_option", { sessionId, configId: "model", value: resolved.value }, { timeoutMs: 15000 });
     line(`[dsh-seat] model: ${resolved.label}`);
+    // Only the model the agent accepted is reported, as the selector's
+    // provider/model. A refused or unadvertised model is never reported.
+    const appliedId = modelIdFromSelector(resolved.value);
+    if (appliedId) void observations.model(appliedId);
   } catch (error) {
     warn(`could not apply the declared model: ${error.message}`);
   }
@@ -878,6 +906,8 @@ async function stop(code, why) {
   if (shuttingDown) return;
   shuttingDown = true;
   await withdrawAllAsks("exited");
+  observations.stop();
+  await observations.drain();
   activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);
