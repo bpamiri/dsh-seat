@@ -24,6 +24,8 @@ limits:
   - launch_wrapper is not implemented and not declared; a member configured with a wrapper is refused at preflight (exit 2, no agent started)
   - run-bound observations (v0.7.18) report the model the agent accepted and dsh's usage_update counts as runner-reported, not verified by OpenRig; context carries usedTokens and windowTokens when both are known, a bare usedTokens stays a count
   - observations are sent only with a run-bound credential (OPENRIG_RUN_ID); without one nothing is reported, and the credential never reaches the agent
-  - observation refusal runner_observation_unverified is retried unchanged, runner_observation_unavailable stops reporting for the run, and any other refusal retires that report without retrying
+  - observation refusals runner_observation_unverified, activity_grant_pending and activity_grant_unverified are retried unchanged; runner_observation_unavailable stops reporting for the run; any other refusal retires that report without retrying (live 0.7.18: conflicting sequence 409 runner_observation_conflict, invalid report 400 invalid_runner_observation)
+  - a post refused at the grant stage after rig down reads 401 activity_grant_revoked, not runner_observation_unavailable; the two observation-specific codes were not observed on a real daemon
+  - an idle seat's reported model and context go stale after the daemon's ten-minute freshness window and read unknown until the next turn renews them; this is the policy working, not a lost report
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed

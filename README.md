@@ -122,7 +122,8 @@ limits: ...   # see preset/dsh.yaml
   plugin-inventory uploads via `cordis.patch.yml`.
 - **Observations are runner-reported, not verified.** The runner reports the model the agent accepted
   (the reply's `currentValue`; never the declared string, never a model the agent refused, and nothing
-  when the reply names no model) and the context counts ACP reports.
+  when the reply names no model) and the context counts ACP reports. Verified live: an unadvertised
+  declared model produced no config write, a context-only report, and `last observed UNKNOWN (no-data)`.
   OpenRig displays them as "runner-reported" with their sample time; they are not evidence of identity,
   input delivery or cancellation, and OpenRig did not observe them itself.
 - A context report carries `usedTokens` and `windowTokens` when both are known, so occupancy is
@@ -132,10 +133,19 @@ limits: ...   # see preset/dsh.yaml
   the runner reports nothing. The credential stays in the runner process and is not passed to the agent.
 - Reporting is change-only: unchanged facts are not re-sent. Freshness follows the daemon's ten-minute
   policy, so the runner renews known facts with a new sequence and sample time at a turn boundary when
-  the last accepted report is older than five minutes — never per chunk.
-- On `runner_observation_unverified` (409) the same report is retried unchanged; on
-  `runner_observation_unavailable` reporting stops for that run and nothing is invented; any other
-  refusal retires that report without retrying it.
+  the last accepted report is older than five minutes — never per chunk. **The user-facing consequence:**
+  an idle seat's reported model and context go stale after ten minutes and read unknown until the next
+  turn renews them. That is the freshness policy working, not a lost report.
+- Refusals: the runner retries `runner_observation_unverified` (409), `activity_grant_pending` (409) and
+  `activity_grant_unverified` (409) unchanged, stops for a run on `runner_observation_unavailable`, and
+  retires any other refusal without retrying it. Live on a 0.7.18 daemon, a conflicting sequence read
+  `409 runner_observation_conflict` and an invalid report `400 invalid_runner_observation`.
+- **What an operator actually sees on revocation.** The contract refuses a post at the grant stage
+  before the observation branch, so after `rig down` a replayed report returns
+  `401 activity_grant_revoked` — not `runner_observation_unavailable`. Nothing is fabricated and no
+  event is recorded. Both observation-specific codes (`runner_observation_unverified`,
+  `runner_observation_unavailable`) remain implemented for their race paths but were **not observed on
+  a real daemon**.
 - Reopening uses `session/resume`; tested with dsh 0.2.1-rc.2, which advertises
   `sessionCapabilities.resume` and no `loadSession` (`session/load` returns `-32601`). The
   `session/load` fallback is for other ACP agents only.
@@ -156,11 +166,17 @@ limits: ...   # see preset/dsh.yaml
 ## Seeing the runner-reported model
 
 Once the daemon has accepted an observation report, OpenRig's model read for the seat has source
-`runner_reported`, and `rig ps` presents it with that provenance and the sample time. The expected
-shape, from the 0.7.18 CLI's formatting code, is `<model> (runner-reported; sample <iso>)`, with a
-context line of the same form when a context report was accepted; the exact strings are OpenRig's to
-change and are not asserted here. Until a report is accepted the model reads as unknown: OpenRig
-never infers it from the configured value.
+`runner_reported`, and `rig ps` shows both the configured value and the last observed one with its
+sample time. As observed on a real 0.7.18 daemon:
+
+```text
+Model (dev-agent@observe-rig): configured deepseek/deepseek-chat; last observed deepseek/deepseek-chat (runner-reported; sample 2026-11-17T23:29:30.187Z)
+Context (…): 1.234% (runner-reported); sample …
+```
+
+Those strings are OpenRig's to change; the observed form is recorded here so a reader knows what to
+expect. Until a report is accepted the model reads as unknown (`last observed UNKNOWN (no-data)`):
+OpenRig never infers it from the configured value.
 
 ## Conformance
 
