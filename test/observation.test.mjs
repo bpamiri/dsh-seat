@@ -6,8 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  OBSERVATION_UNAVAILABLE, OBSERVATION_UNVERIFIED, RENEW_AFTER_MS,
-  createObservationReporter, modelIdFromSelector,
+  GRANT_PENDING, GRANT_UNVERIFIED, OBSERVATION_UNAVAILABLE, OBSERVATION_UNVERIFIED, RENEW_AFTER_MS,
+  createObservationReporter, modelIdFromConfigReply, modelIdFromSelector,
 } from "../src/observation.mjs";
 
 const BASE = "http://127.0.0.1:7441";
@@ -42,6 +42,19 @@ test("model id comes from dsh's opaque selector, and only a real selector", () =
   assert.equal(modelIdFromSelector("[\"deepseek-official\",\"deepseek-v4-pro\"]"), "deepseek-official/deepseek-v4-pro");
   assert.equal(modelIdFromSelector("\"plain\""), null);
   assert.equal(modelIdFromSelector("not json"), null);
+});
+
+test("the accepted model comes from the reply's currentValue, never from what was sent", () => {
+  // dsh returns {configOptions} for set_config_option; its model currentValue is
+  // the agent's own statement of its current model.
+  assert.equal(modelIdFromConfigReply({ configOptions: [{ id: "model", currentValue: "[\"acme-normalised\",\"acme-model-x\"]" }] }),
+    "acme-normalised/acme-model-x");
+  assert.equal(modelIdFromConfigReply({ configOptions: [{ id: "model", currentValue: "plain-model" }] }), "plain-model");
+  // Nothing to report when the reply does not name a model.
+  assert.equal(modelIdFromConfigReply({}), null);
+  assert.equal(modelIdFromConfigReply(undefined), null);
+  assert.equal(modelIdFromConfigReply({ configOptions: [] }), null);
+  assert.equal(modelIdFromConfigReply({ configOptions: [{ id: "reasoning_effort", currentValue: "high" }] }), null);
 });
 
 test("report shape: observation-only body to the activity endpoint with the run credential", async () => {
@@ -131,6 +144,39 @@ test("a conflicting sequence refusal is not retried, and the next report uses a 
   assert.equal(calls.length, 2);
   assert.ok(calls[1].body.sequence > calls[0].body.sequence, "the burnt sequence is not reused for a different payload");
   assert.equal(instance.sent, 1);
+});
+
+test("activity_grant_pending and activity_grant_unverified are retried unchanged", async () => {
+  for (const code of [GRANT_PENDING, GRANT_UNVERIFIED]) {
+    const { fetchImpl, calls } = scriptedFetch([refusal(409, code), ok()]);
+    const { instance, logs } = reporter(fetchImpl);
+    await instance.model("p/m");
+    await instance.drain();
+    assert.equal(calls.length, 2, `${code} is retried`);
+    assert.deepEqual(calls[1].body, calls[0].body, `${code} reuses the identical payload`);
+    assert.equal(instance.stopped, false, `${code} does not stop reporting`);
+    assert.equal(instance.sent, 1);
+    assert.deepEqual(logs, [], `${code} is not logged as a failure`);
+  }
+});
+
+test("a first model report refused by a settling binding is not lost for the run", async () => {
+  // The binding is still activating on the first report: every attempt is
+  // refused, so nothing was accepted (acceptedAt === 0). The next turn boundary
+  // must retry, not early-return because nothing is accepted yet.
+  const { fetchImpl, calls } = scriptedFetch([refusal(409, GRANT_PENDING), refusal(409, GRANT_PENDING), refusal(409, GRANT_PENDING), ok()]);
+  const { instance } = reporter(fetchImpl);
+  await instance.model("p/m");
+  await instance.drain();
+  assert.equal(calls.length, 3, "the first report used its attempts");
+  assert.equal(instance.sent, 0);
+
+  await instance.renewIfStale();
+  await instance.drain();
+  assert.equal(calls.length, 4, "a refused first report is re-attempted rather than lost");
+  assert.equal(instance.sent, 1);
+  assert.deepEqual(calls[3].body.observations, { model: { id: "p/m" } });
+  assert.ok(calls[3].body.sequence > calls[0].body.sequence, "the retry uses a fresh sequence");
 });
 
 test("unchanged facts are not repeated, but a stale fact is renewed once", async () => {

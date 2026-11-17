@@ -13,6 +13,10 @@ const mode = arg("--mode") ?? "fresh";
 const twoAsks = process.argv.includes("--two-asks");
 const twoAsksExit = process.argv.includes("--two-asks-exit");
 const refuseConfig = process.argv.includes("--refuse-config");
+// The config reply's model currentValue: real dsh answers {configOptions} with the
+// model it now has, which is not necessarily the value the runner asked for.
+const replyModel = arg("--reply-model");   // e.g. '["acme-normalised","acme-model-x"]'
+const noModelReply = process.argv.includes("--no-model-reply");
 const MODEL_OPTIONS = [{
   id: "model", name: "Model", type: "select",
   currentValue: "[\"deepseek-official\",\"deepseek-v4-flash\"]",
@@ -57,8 +61,15 @@ async function handle(msg) {
       break;
     case "session/load": fail(msg.id, -32601, "Method not found: session/load"); break;
     case "session/set_config_option":
-      if (refuseConfig) fail(msg.id, -32603, "fake agent: config refused");
-      else reply(msg.id, {});
+      if (refuseConfig) { fail(msg.id, -32603, "fake agent: config refused"); break; }
+      if (noModelReply) { reply(msg.id, {}); break; }
+      reply(msg.id, {
+        configOptions: [{
+          id: "model",
+          currentValue: replyModel ?? JSON.stringify([msg.params?.value ? JSON.parse(msg.params.value)[0] : "deepseek-official",
+            msg.params?.value ? JSON.parse(msg.params.value)[1] : "deepseek-v4-flash"]),
+        }],
+      });
       break;
     case "session/prompt":
       if (twoAsks || twoAsksExit) {

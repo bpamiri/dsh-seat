@@ -27,7 +27,7 @@ Apache-2.0.
 | **Permissions** | Submits the live request to `POST /api/activity/permission-requests` (the contract's body: session/occupant/conversation/turn, the agent's unchanged `requestId`, tool call and options). If a person is asked, OpenRig records `permission_prompt` and the runner reads the ask (`GET …/<askId>?waitSeconds=25`) until the turn ends, delivering the chosen option once, or `cancelled` for refused/withdrawn/stale. Concurrent asks are tracked independently: no working beat while any is pending, each is delivered once, and all open asks are withdrawn on cancel/end/exit. `permitted` (at submit or read) delivers that option; no one can be asked (404, unreachable, unlisted status, or a refusal the table marks permit) gives the agent its `allow_once`, else `allow_always`. Only `denied_by_seat`/`options_unsupported`/`--deny`/no-allow-option refuse and hold: title in the pane, `Notification/permission_prompt`, attention until the next accepted prompt. Withdraws an open ask on cancel/end/exit with `turn_cancelled`/`turn_ended`/`exited`. Unknown agent requests get JSON-RPC `-32601`. |
 | **Resume** | With `OPENRIG_RESUME_REF`, calls ACP `session/resume` (falling back to `session/load` only for other ACP agents that advertise it). Never calls `session/new` on a resume. dsh 0.2.1-rc.2 advertises `sessionCapabilities.resume` and no `loadSession`; `session/load` returns `-32601`. dsh's "not resumable"/not-found refusal is recorded as `error: "missing"`; any other failure is left unconfirmed. The pane states `resuming <ref> (asked by OpenRig)` or `new conversation (OpenRig passed no resume ref)`. `--require-resume` / `DSH_SEAT_REQUIRE_RESUME=1` refuses a launch with no resume ref before spawning dsh: no conversation is created, and the record carries `error: "resume_required"`. |
 | **First input / model** | `OPENRIG_FIRST_INPUT` bytes become the first prompt. `OPENRIG_MODEL` is matched against dsh's advertised `model` option: `provider/model` (provider exact or a substring such as `deepseek` for `deepseek-official`, model id unique), a unique bare model id, or an exact opaque selector. The mapped value is applied with `session/set_config_option` on fresh launches **and on resumes** (from the resume's `configOptions`). A value that cannot be mapped is reported in the pane with what dsh advertised and dsh's own default remains; a raw value is never sent. |
-| **Run-bound observations (v0.7.18)** | When OpenRig supplies a run-bound credential (`OPENRIG_RUN_ID` + the activity token), the runner reports the model the agent **accepted** — as `provider/model` from the selector it sent — and the context ACP reports (`usage_update` `used`/`size`). The report is an observation-only POST to the same endpoint (`{runId, sequence, occurredAt, observations}`), separate from activity: no `hookEvent`, no `eventFamily`, its own sequence. OpenRig shows these as **runner-reported**, not verified by OpenRig. Without `OPENRIG_RUN_ID` (an unbound install-token launch) nothing is reported. |
+| **Run-bound observations (v0.7.18)** | When OpenRig supplies a run-bound credential (`OPENRIG_RUN_ID` + the activity token), the runner reports the model the agent **accepted** — as `provider/model`, read from the `session/set_config_option` reply's model `currentValue`, not from the value it asked for — and the context ACP reports (`usage_update` `used`/`size`). A reply that names no model reports nothing. The report is an observation-only POST to the same endpoint (`{runId, sequence, occurredAt, observations}`), separate from activity: no `hookEvent`, no `eventFamily`, its own sequence. OpenRig shows these as **runner-reported**, not verified by OpenRig. Without `OPENRIG_RUN_ID` (an unbound install-token launch) nothing is reported. |
 | **Agent environment** | The child gets the baseline shell, OpenRig's identity/routing variables (`OPENRIG_SESSION_NAME`, `OPENRIG_NODE_ID`, `OPENRIG_RUNTIME`, `OPENRIG_OCCUPANT_GENERATION`, `OPENRIG_HOME/URL/HOST/PORT`), the seat's own `DSH_HOME`, dsh's telemetry choice (`DSH_TELEMETRY_DISABLED=1` unless the operator set one), and the declared provider's key when set. It does not inherit the activity hook token or the runner-only launch/attempt/resume variables. |
 
 ## Install
@@ -121,7 +121,8 @@ limits: ...   # see preset/dsh.yaml
   (the operator's home) is refused. The generated home disables dsh's session-log and
   plugin-inventory uploads via `cordis.patch.yml`.
 - **Observations are runner-reported, not verified.** The runner reports the model the agent accepted
-  (never the declared string, and never a model the agent refused) and the context counts ACP reports.
+  (the reply's `currentValue`; never the declared string, never a model the agent refused, and nothing
+  when the reply names no model) and the context counts ACP reports.
   OpenRig displays them as "runner-reported" with their sample time; they are not evidence of identity,
   input delivery or cancellation, and OpenRig did not observe them itself.
 - A context report carries `usedTokens` and `windowTokens` when both are known, so occupancy is
@@ -154,10 +155,12 @@ limits: ...   # see preset/dsh.yaml
 
 ## Seeing the runner-reported model
 
-Once the daemon has accepted an observation report, `rig ps` shows the seat's model with its
-provenance and sample time — `<provider>/<model> (runner-reported; sample <iso>)` — and, when a
-context report was accepted, a `Context (<seat>): … (runner-reported); sample <iso>` line. Until a
-report is accepted the model reads as unknown: OpenRig never infers it from the configured value.
+Once the daemon has accepted an observation report, OpenRig's model read for the seat has source
+`runner_reported`, and `rig ps` presents it with that provenance and the sample time. The expected
+shape, from the 0.7.18 CLI's formatting code, is `<model> (runner-reported; sample <iso>)`, with a
+context line of the same form when a context report was accepted; the exact strings are OpenRig's to
+change and are not asserted here. Until a report is accepted the model reads as unknown: OpenRig
+never infers it from the configured value.
 
 ## Conformance
 

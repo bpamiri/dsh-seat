@@ -23,7 +23,7 @@ import { buildAgentEnv } from "../src/env.mjs";
 import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
 import { createPermissionTransport, selectPermitOption } from "../src/permission.mjs";
-import { createObservationReporter, modelIdFromSelector } from "../src/observation.mjs";
+import { createObservationReporter, modelIdFromConfigReply } from "../src/observation.mjs";
 
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
@@ -812,8 +812,12 @@ async function openConversation() {
     // Apply the model before the launch record: OpenRig may consider the seat
     // ready as soon as the record exists, so the declared model must already be
     // in effect (or reported as unappliable) by then.
-    await applyModel(result?.configOptions);
+    const appliedModel = await applyModel(result?.configOptions);
     recordConversation(sessionId);
+    // The observation is posted after the launch record, so the run binding has
+    // the conversation before the first report; a grant that is still settling
+    // is retried rather than lost.
+    if (appliedModel) void observations.model(appliedModel);
   }
 }
 
@@ -845,8 +849,9 @@ async function reopen(ref) {
   sessionId = ref;
   // A changed model on restore must apply too, from the resume's configOptions,
   // before the record makes the seat ready.
-  await applyModel(result?.configOptions);
+  const appliedModel = await applyModel(result?.configOptions);
   recordConversation(ref);
+  if (appliedModel) void observations.model(appliedModel);
 }
 
 function isMissing(error) {
@@ -857,24 +862,35 @@ function isMissing(error) {
     || /session not found|not found|no such session|unknown session|session is not resumable/i.test(String(error?.message ?? ""));
 }
 
+/** Apply the declared model; return the model the AGENT accepted, if it says. */
 async function applyModel(configOptions) {
-  if (!OPENRIG.model) return;
+  if (!OPENRIG.model) return null;
   const resolved = resolveModelChoice(configOptions, OPENRIG.model);
   if (!resolved.ok) {
     // Reported, never silently ignored: the pane says what was asked and what
     // dsh advertised; dsh's own default stays in effect.
     warn(`declared model ${OPENRIG.model} not applied: ${resolved.error}`);
-    return;
+    return null;
   }
   try {
-    await request("session/set_config_option", { sessionId, configId: "model", value: resolved.value }, { timeoutMs: 15000 });
+    const reply = await request("session/set_config_option", { sessionId, configId: "model", value: resolved.value }, { timeoutMs: 15000 });
     line(`[dsh-seat] model: ${resolved.label}`);
-    // Only the model the agent accepted is reported, as the selector's
-    // provider/model. A refused or unadvertised model is never reported.
-    const appliedId = modelIdFromSelector(resolved.value);
-    if (appliedId) void observations.model(appliedId);
+    // Report what the agent says its current model is — not what we sent. dsh
+    // returns {configOptions} whose model currentValue may differ from the
+    // requested selector; a reply with no model value reports nothing, because
+    // the requested value is not evidence of what the agent accepted.
+    const appliedId = modelIdFromConfigReply(reply);
+    if (!appliedId) {
+      warn("the agent's config reply carries no model value; the applied model is not reported");
+      return null;
+    }
+    // Say it in the pane when the accepted model is not the requested one.
+    const requestedId = modelIdFromConfigReply({ configOptions: [{ id: "model", currentValue: resolved.value }] });
+    if (appliedId !== requestedId) line(`[dsh-seat] the agent reports model: ${appliedId}`);
+    return appliedId;
   } catch (error) {
     warn(`could not apply the declared model: ${error.message}`);
+    return null;
   }
 }
 

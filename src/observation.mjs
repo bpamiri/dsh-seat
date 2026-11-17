@@ -26,6 +26,9 @@
 /** Refusal codes with a specific meaning for observation reporting. */
 export const OBSERVATION_UNVERIFIED = "runner_observation_unverified";
 export const OBSERVATION_UNAVAILABLE = "runner_observation_unavailable";
+/** Run binding not settled yet (contract §4): retry the same report. */
+export const GRANT_PENDING = "activity_grant_pending";
+export const GRANT_UNVERIFIED = "activity_grant_unverified";
 
 /** How old an accepted fact may be before a deliberate renewal reposts it. */
 export const RENEW_AFTER_MS = 5 * 60_000;
@@ -44,6 +47,28 @@ export function modelIdFromSelector(value) {
   } catch { /* not a selector */ }
   return null;
 }
+
+/**
+ * The model the AGENT says is current, read from a `session/set_config_option`
+ * reply (dsh returns `{configOptions}`). This is the accepted model, which is
+ * not necessarily the value the runner asked for. No model value in the reply
+ * means there is nothing honest to report.
+ */
+export function modelIdFromConfigReply(reply) {
+  const options = Array.isArray(reply?.configOptions) ? reply.configOptions : null;
+  if (!options) return null;
+  const model = options.find((option) => option?.id === "model");
+  const current = typeof model?.currentValue === "string" ? model.currentValue : null;
+  if (!current) return null;
+  const selector = modelIdFromSelector(current);
+  if (selector) return selector;
+  // A plain (non-selector) current value is still the agent's own word for its
+  // current model; report it verbatim rather than dropping the fact.
+  return current.trim() || null;
+}
+
+/** Codes that mean "not now": the same report is retried unchanged. */
+const RETRYABLE_CODES = new Set([OBSERVATION_UNVERIFIED, GRANT_PENDING, GRANT_UNVERIFIED]);
 
 function cleanContext(context) {
   if (!context) return null;
@@ -107,7 +132,7 @@ export function createObservationReporter({
     const code = typeof body?.code === "string" ? body.code : null;
     if (response.ok) return { kind: "accepted", receipt: body };
     if (code === OBSERVATION_UNAVAILABLE) return { kind: "unavailable", reason: code };
-    if (code === OBSERVATION_UNVERIFIED) return { kind: "retry", reason: code };
+    if (RETRYABLE_CODES.has(code)) return { kind: "retry", reason: code };
     return { kind: "refused", reason: code ?? `status ${response.status}` };
   }
 
@@ -122,7 +147,9 @@ export function createObservationReporter({
       // body, so a receipt is returned rather than a second fact recorded.
       const outcome = await sendOnce(payload);
       if (outcome.kind === "accepted") {
-        accepted = sample;
+        // Merge, so a model report and a context report each keep the other's
+        // last accepted value.
+        accepted = { ...accepted, ...sample };
         acceptedAt = now().getTime();
         sent += 1;
         return;
@@ -177,10 +204,16 @@ export function createObservationReporter({
       if (!cleaned) return chain;
       return report({ context: cleaned });
     },
-    /** Repost known facts if they would otherwise go stale at a turn boundary. */
+    /**
+     * Repost known facts if they would otherwise go stale at a turn boundary —
+     * and, before anything has been accepted, retry the facts a refusal (or a
+     * not-yet-settled run binding) left unsent, so the first model report is
+     * never lost for the run.
+     */
     renewIfStale() {
       if (!enabled || stopped) return chain;
-      if (acceptedAt === 0 || now().getTime() - acceptedAt < renewAfterMs) return chain;
+      const fresh = acceptedAt !== 0 && now().getTime() - acceptedAt < renewAfterMs;
+      if (fresh) return chain;
       return report({}, { force: true });
     },
     /** Never report again (agent exit, shutdown): no new facts, no fabrication. */
