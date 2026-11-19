@@ -440,10 +440,13 @@ function startAgent(dshHome) {
     // No idle heartbeat once the agent is gone; the exit Stop below is final.
     activity.agentExited();
     observations.stop();
-    // A request whose custody was accepted but whose native write did not
-    // happen is reported as unavailable, never quietly dropped.
-    nativeChannel.stop();
-    void nativeChannel.drain(600);
+    // Give the in-flight prompt's terminal receipt a moment to post (a failed
+    // wake must still be reported as failed), then stop the channel.
+    void (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await nativeChannel.drain(800);
+      nativeChannel.stop();
+    })();
     if (!shuttingDown) {
       void (async () => {
         await withdrawAllAsks("exited");
@@ -693,18 +696,22 @@ async function handleNativeCancel(frame, entry, hooks) {
   if (!promptScope.submitted) {
     // The prompt exists but its write is not established: ownership is unknown,
     // which is never proof of "not this turn".
-    await entry.reject("native_turn_ownership_unknown", { kind: "cancel", reason: "native_turn_ownership_unknown", applied: false });
+    await entry.reject("native_turn_ownership_unknown");
     return;
   }
   if (cancellation) {
-    await entry.reject("cancellation_in_progress", { kind: "cancel", reason: "cancellation_in_progress", applied: false });
+    await entry.reject("cancellation_in_progress");
     return;
   }
   const operation = { entry, target, submitted: false };
   cancellation = operation;
-  const withdrawal = await hooks.prepare(frame);
+  // Core answers `confirmed:false` while its asks/submissions are still
+  // settling; poll until it confirms or says this is no longer our turn.
+  const prepared = await hooks.prepare(frame);
   if (cancellation !== operation) return;
-  if (!withdrawal) { cancellation = null; await entry.reject("preparation_failed", { kind: "cancel", reason: "preparation_failed", applied: false }); return; }
+  if (!prepared) { cancellation = null; await entry.reject("runner_reporting_authority_lost"); return; }
+  if (prepared.timeout) { cancellation = null; await entry.reject("preparation_timeout"); return; }
+  const withdrawal = prepared.withdrawal;
   if (withdrawal.notThisTurn || promptScope?.nativeTurnId !== target.nativeTurnId) {
     cancellation = null;
     await entry.result({ kind: "cancel", outcome: "not-this-turn", confirmed: false });
@@ -712,7 +719,7 @@ async function handleNativeCancel(frame, entry, hooks) {
   }
   if (withdrawal.confirmed !== true) {
     cancellation = null;
-    await entry.reject("preparation_failed", { kind: "cancel", reason: "preparation_failed", applied: false });
+    await entry.reject("preparation_timeout");
     return;
   }
   // Core withdrew its asks; withdrawn approvals stay withdrawn.
@@ -731,7 +738,7 @@ async function handleNativeCancel(frame, entry, hooks) {
   operation.submitted = true;
   // Requested is not stopped: confirmation waits for dsh's own stop reason.
   entry.markSubmitted(target.nativeTurnId, turn?.turnId ?? null,
-    { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+    { result: { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false } });
   line(`[native] cancellation ${frame.requestId} for ${target.nativeTurnId} requested, not confirmed`);
 }
 
@@ -883,6 +890,9 @@ async function pump() {
     stopReason = typeof result?.stopReason === "string" ? result.stopReason : "end_turn";
   } catch (error) {
     failed = true;
+    // A failed prompt is a failure, not a completed turn: defaulting to
+    // end_turn here published partial text as a "completed" wake answer.
+    stopReason = "error";
     if (!childExited && !shuttingDown) {
       warn(`prompt failed: ${error.message}`);
       post("Notification", "runtime_error", { turnId: turn.turnId });
@@ -890,7 +900,7 @@ async function pump() {
     if (entry && error?.code !== null && [-32600, -32601, -32602].includes(error?.code)) {
       // A known pre-effect rejection: the agent never took the prompt.
       entry.terminalReported = true;
-      void entry.reject("native_prompt_rejected", { kind: entry.frame.kind, reason: "native_prompt_rejected", applied: false });
+      void entry.reject("native_prompt_rejected");
     }
   } finally {
     void nativeChannel.reportTurn({ nativeTurnId, state: "closed", acceptedTurnId: turn.turnId });

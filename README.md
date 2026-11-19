@@ -186,10 +186,14 @@ Core sends a request the runner:
   terminal outcome become the answer (`{kind:"wake",answer,nativeTurnId,completion}`). Tools, earlier output and
   partial streaming text are never substituted, and an uncorrelated wake reports
   `{completion:"unknown",answer:null,ownershipUnknown:true}` instead of inventing an answer;
-- treats `cancel` as a named invocation: it prepares with Core (which withdraws its asks first), rechecks the exact
-  target, sends one `session/cancel`, and reports `requested`/`confirmed:false`. It reports `cancelled` only when dsh
-  answers `stopReason: "cancelled"`; a target the runner does not hold is `not-this-turn`, and ownership it cannot
-  establish is refused as unknown rather than claimed.
+- treats `cancel` as a named invocation: it prepares with Core (which withdraws its asks first) and polls while that
+  withdrawal is still `confirmed: false`, rechecks the exact target, sends one `session/cancel`, and reports
+  `requested`/`confirmed:false`. It reports `cancelled` only when dsh answers `stopReason: "cancelled"`; a target the
+  runner does not hold is `not-this-turn`, and ownership it cannot establish is refused as unknown rather than claimed.
+- delivers frames in run-local **sequence order**: a prompt is written only once every lower retained sequence has been
+  decided, so a slow acknowledgement cannot reorder the agent's prompts;
+- never promotes partial text: a prompt that fails or whose agent exits reports `completion: "failed"` or `"unknown"`
+  with `answer: null`, whatever had already streamed into the pane.
 
 A request whose custody was accepted but whose native write could not happen is reported **unavailable** — in the
 pane and to Core — never dropped silently: a nudge that dies quietly would look like an idle seat.

@@ -30,10 +30,42 @@ async function waitFor(read, ms = 8000) {
 }
 
 /** A stand-in Core: POST receipts, and a GET stream the test pushes frames into. */
-async function standIn(t, { refuseAckWith = null } = {}) {
+async function standIn(t, {
+  refuseAckWith = null, delayAckSequence = null, prepareConfirmedAfter = 0, validate = true,
+} = {}) {
   const posts = [];
+  const rejectedPosts = [];
   const frames = [];
   const waiters = new Set();
+  const prepCalls = [];
+  // The shape rules Core enforces (runner-channel.ts): a result is required for
+  // rejected/completed and for a cancel's submitted, and it must be nested.
+  const validateReceipt = (body) => {
+    if (body.type === "hello") return body.version === 1 ? null : "invalid_runner_hello";
+    if (body.type === "turn") return typeof body.nativeTurnId === "string" ? null : "invalid_runner_turn";
+    if (!["ack", "submitted", "rejected", "result"].includes(body.type)) return "invalid_runner_receipt";
+    if (body.type === "ack") return body.state === "accepted" ? null : "invalid_runner_receipt";
+    if (body.type === "rejected" || body.type === "result" || (body.type === "submitted" && body.result !== undefined)) {
+      const result = body.result;
+      if (!result || typeof result !== "object" || Array.isArray(result)) return "invalid_runner_result";
+      if (result.kind === "cancel") {
+        if (typeof result.outcome !== "string" || typeof result.confirmed !== "boolean") return "invalid_runner_result";
+        if (body.type === "submitted") {
+          if (!prepCalls.at(-1)?.confirmed) return "runner_withdrawal_unconfirmed";
+          if (result.outcome !== "requested" || result.confirmed !== false) return "invalid_runner_result";
+        }
+        if (result.confirmed !== (result.outcome === "cancelled")) return "invalid_runner_result";
+      }
+      if (body.type === "rejected" && result.kind !== "cancel"
+        && (typeof result.reason !== "string" || !result.reason)) return "invalid_runner_result";
+      if (result.ownershipUnknown !== undefined
+        && (result.kind !== "wake" || result.completion !== "unknown" || result.answer !== null)) return "invalid_runner_result";
+      if (result.kind === "wake" && body.type === "result"
+        && (result.completion !== "completed" && result.answer !== null)) return "invalid_runner_result";
+    }
+    if (body.type === "submitted" && body.result === undefined && ["input", "wake"].includes(body.result?.kind)) return null;
+    return null;
+  };
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -59,13 +91,26 @@ async function standIn(t, { refuseAckWith = null } = {}) {
         return;
       }
       const body = raw ? JSON.parse(raw) : {};
+      if (body.type === "cancel-prepare") {
+        prepCalls.push({ confirmed: prepCalls.length >= prepareConfirmedAfter });
+        res.writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ withdrawal: { confirmed: prepCalls.at(-1).confirmed } }));
+        return;
+      }
       posts.push({ type: body.type, body });
+      const problem = validate ? validateReceipt(body) : null;
+      if (problem) {
+        rejectedPosts.push({ type: body.type, code: problem, body });
+        res.writeHead(problem === "runner_withdrawal_unconfirmed" ? 409 : 400, { "content-type": "application/json" })
+          .end(JSON.stringify({ code: problem }));
+        return;
+      }
       if (body.type === "ack" && refuseAckWith) {
         res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ code: refuseAckWith }));
         return;
       }
-      if (body.type === "cancel-prepare") {
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ withdrawal: { confirmed: true } }));
+      if (body.type === "ack" && delayAckSequence && body.sequence === delayAckSequence) {
+        setTimeout(() => { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true })); }, 300);
         return;
       }
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
@@ -78,6 +123,8 @@ async function standIn(t, { refuseAckWith = null } = {}) {
     posts,
     push(frame) { frames.push({ version: 1, runId: RUN, ...frame }); for (const pump of waiters) pump(); },
     ofType: (type) => posts.filter((post) => post.type === type).map((post) => post.body),
+    rejectedPosts,
+    prepCalls,
   };
 }
 
@@ -145,14 +192,13 @@ test("a named cancel is requested first, and cancelled only on the agent's stop 
   assert.ok(await waitFor(() => core.ofType("turn").some((turn) => turn.state === "opened")), "no opened turn report");
   const opened = core.ofType("turn").find((turn) => turn.state === "opened");
   core.push({ requestId: "req-cancel-1", sequence: 2, kind: "cancel", payload: { target: { runId: RUN, nativeTurnId: opened.nativeTurnId } } });
-  const submitted = await waitFor(() => core.ofType("submitted").find((post) => post.kind === "cancel"));
+  const submitted = await waitFor(() => core.ofType("submitted").find((post) => post.result?.kind === "cancel"));
   assert.ok(submitted, `no cancel submission; pane: ${run.out()}`);
-  assert.equal(submitted.outcome, "requested");
-  assert.equal(submitted.confirmed, false, "requested is not stopped");
+  assert.deepEqual(submitted.result, { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
   const result = await waitFor(() => core.ofType("result").find((post) => post.result?.kind === "cancel"));
   assert.ok(result, "no cancel result");
   assert.deepEqual(result.result, { kind: "cancel", outcome: "cancelled", confirmed: true });
-  assert.ok(core.ofType("cancel-prepare").length >= 1, "cancel-prepare was not posted");
+  assert.ok(core.prepCalls.length >= 1, "cancel-prepare was not posted");
 });
 
 test("a cancel for a target this runner does not have is not-this-turn", async (t) => {
@@ -187,3 +233,66 @@ test("without a run id nothing connects, so typed seats are unaffected", async (
   assert.equal(core.ofType("hello").length, 0);
 });
 function existsSyncSafe(path) { try { readFileSync(path); return true; } catch { return false; } }
+
+test("a failed wake is failed with no answer: partial text is never promoted", async (t) => {
+  const core = await standIn(t);
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-wake-fail", sequence: 1, kind: "wake", payload: { question: "WAKE:FAIL" } });
+  const result = await waitFor(() => core.ofType("result").find((post) => post.result?.kind === "wake"));
+  assert.ok(result, `no wake result; pane: ${run.out()}`);
+  assert.equal(result.result.completion, "failed", "a failed prompt is failed, not completed");
+  assert.equal(result.result.answer, null, "partial text must never become an answer");
+  assert.doesNotMatch(JSON.stringify(result.result), /partial-text-before-error/);
+});
+
+test("a wake whose agent exits mid-turn reports a failed/unknown completion with no answer", async (t) => {
+  const core = await standIn(t);
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-wake-exit", sequence: 1, kind: "wake", payload: { question: "WAKE:EXIT" } });
+  const result = await waitFor(() => core.ofType("result").find((post) => post.result?.kind === "wake"), 10000);
+  assert.ok(result, `no wake result; pane: ${run.out()}`);
+  assert.ok(["failed", "unknown"].includes(result.result.completion), `completion was ${result.result.completion}`);
+  assert.equal(result.result.answer, null);
+  assert.doesNotMatch(JSON.stringify(result.result), /partial-text-before-exit/);
+});
+
+test("cancel-prepare polls while Core's withdrawal is unconfirmed, then proceeds", async (t) => {
+  const core = await standIn(t, { prepareConfirmedAfter: 3 });
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-hold-2", sequence: 1, kind: "input", payload: { text: "please HOLD" } });
+  assert.ok(await waitFor(() => prompts(run.log)[0]));
+  const opened = await waitFor(() => core.ofType("turn").find((turn) => turn.state === "opened"));
+  core.push({ requestId: "req-cancel-2", sequence: 2, kind: "cancel", payload: { target: { runId: RUN, nativeTurnId: opened.nativeTurnId } } });
+  const submitted = await waitFor(() => core.ofType("submitted").find((post) => post.result?.kind === "cancel"));
+  assert.ok(submitted, `cancel never proceeded after an unconfirmed withdrawal; pane: ${run.out()}`);
+  assert.ok(core.prepCalls.length >= 4, `expected repeated preparation, saw ${core.prepCalls.length}`);
+  assert.ok(core.prepCalls.slice(0, 3).every((call) => call.confirmed === false), "the first polls were unconfirmed");
+  assert.deepEqual(core.rejectedPosts, [], "no malformed receipt was posted");
+});
+
+test("a pre-effect rejection is posted with the result nested, as Core validates it", async (t) => {
+  const core = await standIn(t);
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-reject-1", sequence: 1, kind: "input", payload: { text: "please REJECT" } });
+  const rejected = await waitFor(() => core.ofType("rejected")[0]);
+  assert.ok(rejected, `no rejected receipt; pane: ${run.out()}`);
+  assert.deepEqual(Object.keys(rejected).sort(),
+    ["acceptedTurnId", "nativeTurnId", "requestId", "result", "runId", "sequence", "type"]);
+  assert.equal(rejected.kind, undefined, "kind belongs under result, not at the top level");
+  assert.deepEqual(rejected.result, { kind: "input", reason: "native_prompt_rejected", applied: false });
+  assert.deepEqual(core.rejectedPosts, [], "Core accepted the rejected receipt");
+});
+
+test("delivery follows sequence order even when a lower ack arrives last", async (t) => {
+  const core = await standIn(t, { delayAckSequence: 1 });
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-first", sequence: 1, kind: "input", payload: { text: "FIRST" } });
+  core.push({ requestId: "req-second", sequence: 2, kind: "input", payload: { text: "SECOND" } });
+  assert.ok(await waitFor(() => prompts(run.log).length === 2, 10000), `pane: ${run.out()}`);
+  assert.deepEqual(prompts(run.log), ["FIRST", "SECOND"], "run-local sequence order, not ack arrival order");
+});

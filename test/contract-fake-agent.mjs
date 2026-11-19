@@ -124,9 +124,26 @@ async function handle(msg) {
         const text = (msg.params?.prompt ?? []).map((part) => part.text ?? "").join("");
         const sessionId = "fake-new";
         if (text.startsWith("WAKE:")) {
+          if (text === "WAKE:FAIL") {
+            // One chunk, then the prompt fails: partial text must never become an answer.
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial-text-before-error" } } } });
+            fail(msg.id, -32603, "fake agent: this turn fails");
+            return;
+          }
+          if (text === "WAKE:EXIT") {
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial-text-before-exit" } } } });
+            setTimeout(() => exit(3, "native exit mid-wake"), 50);
+            return;
+          }
           send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
             sessionUpdate: "agent_message_chunk", content: { type: "text", text: `answer ${text}` } } } });
           reply(msg.id, { stopReason: "end_turn" });
+          return;
+        }
+        if (text.includes("REJECT")) {
+          fail(msg.id, -32602, "fake agent: prompt rejected");
           return;
         }
         if (text.includes("HOLD")) {

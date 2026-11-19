@@ -189,3 +189,45 @@ test("hello advertises explicit capabilities for what this implementation does",
   assert.equal(hello.body.runId, RUN);
   assert.equal(hello.body.retained, false, "first hello: nothing retained yet");
 });
+
+test("a rejected receipt nests its detail under result, and a cancel submission carries one", async () => {
+  // Core validates the body: `kind`, `reason` and `applied` at the top level are
+  // a 400 forever, so the shape is pinned here.
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ method: init.method ?? "GET", body });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  const channel = createNativeChannel({ base: BASE, token: "t", runId: RUN, fetchImpl,
+    streamImpl: async () => ({ ok: false, status: 503, json: async () => ({ code: "unavailable" }), body: null }),
+    reconnectMs: 1, delivery: { input() {}, wake() {}, cancel(frame, entry) {
+      entry.markSubmitted("dsh-prompt-1", "1", { result: { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false } });
+      entry.reject("cancellation_in_progress");
+    } } });
+  await channel.accept(frame({ kind: "cancel", payload: { target: { runId: RUN, nativeTurnId: "dsh-prompt-1" } } }));
+  await channel.drain(500);
+  const rejected = calls.map((call) => call.body).find((body) => body?.type === "rejected");
+  assert.ok(rejected, "a rejected receipt was posted");
+  assert.equal(rejected.kind, undefined, "kind is not a top-level field");
+  assert.deepEqual(rejected.result, { kind: "cancel", reason: "cancellation_in_progress", applied: false });
+  const submitted = calls.map((call) => call.body).find((body) => body?.type === "submitted");
+  assert.deepEqual(submitted.result, { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+});
+
+test("a 400 invalid receipt is permanent: it is not retried, and the entry is retired", async () => {
+  let posts = 0;
+  const fetchImpl = async (url, init) => {
+    if ((init.method ?? "GET") === "POST") {
+      posts += 1;
+      return { ok: false, status: 400, json: async () => ({ code: "invalid_runner_result" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const channel = createNativeChannel({ base: BASE, token: "t", runId: RUN, fetchImpl,
+    streamImpl: async () => ({ ok: false, status: 503, json: async () => ({ code: "unavailable" }), body: null }),
+    reconnectMs: 1, delivery: { input() {}, wake() {}, cancel() {} } });
+  await channel.accept(frame());
+  assert.equal(posts, 1, "a malformed receipt is posted once, not retried");
+  assert.equal(channel.quarantined, true);
+});

@@ -31,11 +31,19 @@ export const CHANNEL_VERSION = 1;
 /** Retryable refusals: the same saved receipt is posted again. */
 export const RETRYABLE_CODES = new Set(["runner_hello_required", "runner_grant_pending", "runner_grant_unverified"]);
 
-/** A positive run refusal: stop reporting for this run (the fence, not a retry). */
+/** Receipt shapes Core refuses outright: retrying the same body can never help. */
+export const PERMANENT_CODES = new Set([
+  "runner_withdrawal_unconfirmed", "runner_run_mismatch", "runner_split_unconfirmed",
+]);
+
+/** A positive run refusal or a malformed receipt: stop, do not retry the same body. */
 export function isPermanentRefusal(status, code) {
   if (RETRYABLE_CODES.has(code ?? "")) return false;
   if (status === 401 || status === 403) return true;
-  return ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
+  if (status === 400) return true; // invalid_runner_post / _hello / _receipt / _result / _turn / _cursor
+  if ((code ?? "").startsWith("invalid_runner_")) return true;
+  return PERMANENT_CODES.has(code ?? "")
+    || ["runner_grant_required", "runner_grant_revoked", "runner_grant_stale"].includes(code ?? "");
 }
 
 /** The largest frame the bounded SSE envelope allows without a size comment. */
@@ -190,16 +198,51 @@ export function createNativeChannel({
         entry.resultValue = result;
         return report(entry, "result", { result });
       },
-      /** A pre-effect refusal: the request never touched the agent. */
+      /**
+       * A pre-effect refusal: the request never touched the agent. Core requires
+       * the detail nested under `result`, so it is never malformed.
+       */
       reject(reason, extra = {}) {
         if (entry.state === "terminal") return entry.reports;
         entry.state = "terminal";
-        return report(entry, "rejected", { ...extra });
+        const kind = entry.frame.kind;
+        const result = extra.result ?? { kind, reason: String(reason), applied: false, ...(extra.outcome ? { outcome: extra.outcome } : {}) };
+        return report(entry, "rejected", { result });
       },
       onUnavailable: null,
     };
     return entry;
   };
+
+  // Run-local ordering: a frame is delivered only when every lower retained
+  // sequence has been decided, so a slow acknowledgement can never reorder the
+  // agent's prompts. Gaps are fine — only sequences we actually retained order.
+  const ordered = new Map(); // sequence -> entry
+  let orderChain = Promise.resolve();
+  function drainOrdered() {
+    orderChain = orderChain.then(async () => {
+      for (;;) {
+        const next = [...ordered.entries()].sort((a, b) => a[0] - b[0])[0];
+        if (!next) return;
+        const [sequence, entry] = next;
+        if (entry.state === "accepting") return; // its ack decides: delivered, or skipped
+        ordered.delete(sequence);
+        if (entry.state === "unavailable" || entry.state === "skipped") continue;
+        try {
+          if (entry.frame.kind === "cancel") delivery.cancel(entry.frame, entry, { prepare: prepareCancellation });
+          else if (entry.frame.kind === "wake") delivery.wake(entry.frame, entry);
+          else delivery.input(entry.frame, entry);
+        } catch (error) {
+          log(`native delivery failed for ${entry.frame.requestId}: ${error?.message ?? error}`);
+          entry.state = "unavailable";
+          deliveryUnavailable(entry);
+        }
+        // Keep draining: later frames may also be ready, and they are later in
+        // sequence order by construction.
+      }
+    });
+    return orderChain;
+  }
 
   /** Accept one SSE frame: validate, retain, acknowledge custody, then deliver. */
   async function accept(raw) {
@@ -227,28 +270,46 @@ export function createNativeChannel({
     }
     const entry = entryFor(frame);
     retained.set(frame.requestId, entry);
+    ordered.set(frame.sequence, entry);
     entry.acceptance = (async () => {
       const acked = await postReceipt({ type: "ack", runId: frame.runId, requestId: frame.requestId,
         sequence: frame.sequence, state: "accepted" });
-      if (!acked) return;
+      if (!acked) {
+        // Custody could not be established: never deliver, and never let it
+        // hold up a later frame.
+        entry.state = "unavailable";
+        ordered.delete(frame.sequence);
+        drainOrdered();
+        return;
+      }
       entry.state = "queued";
-      // Only after durable acceptance may a native effect happen.
-      if (frame.kind === "cancel") delivery.cancel(frame, entry, { prepare: prepareCancellation });
-      else if (frame.kind === "wake") delivery.wake(frame, entry);
-      else delivery.input(frame, entry);
+      // Only after durable acceptance, and in sequence order, may a native
+      // effect happen. Awaiting the ordered drain keeps the custody promise
+      // complete when `accept()` resolves.
+      await drainOrdered();
     })();
     await entry.acceptance;
   }
 
-  /** Core withdraws its asks and confirms before any native abort is written. */
-  async function prepareCancellation(frame) {
-    for (;;) {
+  /**
+   * Core withdraws its asks and confirms before any native abort is written.
+   * `confirmed:false` is not a failure: Core returns it while asks and
+   * submissions are still settling, so poll until it confirms, says the turn is
+   * gone, or the bounded wait runs out.
+   */
+  async function prepareCancellation(frame, { polls = 40, intervalMs = 250 } = {}) {
+    for (let attempt = 0; attempt < polls; attempt += 1) {
       const response = await call("POST", { type: "cancel-prepare", runId: frame.runId, requestId: frame.requestId, sequence: frame.sequence });
       if (isPermanentRefusal(response.status, response.body?.code)) { quarantine(`cancel-prepare refused: ${response.body?.code ?? response.status}`); return null; }
-      if (response.status === 200 && response.body?.withdrawal) return response.body.withdrawal;
+      if (response.status === 200 && response.body?.withdrawal) {
+        const withdrawal = response.body.withdrawal;
+        if (withdrawal.confirmed === true || withdrawal.notThisTurn === true) return { withdrawal };
+      }
       if (stopped) return null;
-      await sleep(reconnectMs);
+      await sleep(intervalMs);
     }
+    log(`cancel-prepare for ${frame.requestId} was never confirmed`);
+    return { timeout: true };
   }
 
   /** Turn reports: the named invocation Core needs for a targeted cancel. */
