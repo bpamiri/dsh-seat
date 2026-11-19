@@ -196,7 +196,10 @@ Core sends a request the runner:
   with `answer: null`, whatever had already streamed into the pane.
 
 A request whose custody was accepted but whose native write could not happen is reported **unavailable** — in the
-pane and to Core — never dropped silently: a nudge that dies quietly would look like an idle seat.
+pane and to Core — never dropped silently: a nudge that dies quietly would look like an idle seat. A request refused
+before any effect is named in the pane with its reason (`native request <id> (<kind>) was not applied: <reason>`), so
+the failure is visible to whoever is reading the seat. On shutdown the agent is ended first, so an outstanding prompt
+still posts its terminal receipt before the channel stops.
 
 The typed path is unchanged and remains the rollback:
 `rig seat set-input-route <seat> --route typed --reason "revert to typed input"`.

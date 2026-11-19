@@ -685,6 +685,16 @@ async function handlePermissionRequest(msg) {
 
 function pumpLaunch() { void pump(); }
 
+/**
+ * A refusal that never touched the agent is still a failure a person must be
+ * able to see: say it in the pane (and the log) with its reason, then retire the
+ * request so Core records the rejection.
+ */
+async function rejectVisible(entry, reason) {
+  warn(`native request ${entry.frame.requestId} (${entry.frame.kind}) was not applied: ${reason}`);
+  return entry.reject(reason);
+}
+
 /** A named cancel: prepare, recheck, then one native session/cancel. */
 async function handleNativeCancel(frame, entry, hooks) {
   const target = frame.payload.target;
@@ -696,11 +706,11 @@ async function handleNativeCancel(frame, entry, hooks) {
   if (!promptScope.submitted) {
     // The prompt exists but its write is not established: ownership is unknown,
     // which is never proof of "not this turn".
-    await entry.reject("native_turn_ownership_unknown");
+    await rejectVisible(entry, "native_turn_ownership_unknown");
     return;
   }
   if (cancellation) {
-    await entry.reject("cancellation_in_progress");
+    await rejectVisible(entry, "cancellation_in_progress");
     return;
   }
   const operation = { entry, target, submitted: false };
@@ -709,8 +719,8 @@ async function handleNativeCancel(frame, entry, hooks) {
   // settling; poll until it confirms or says this is no longer our turn.
   const prepared = await hooks.prepare(frame);
   if (cancellation !== operation) return;
-  if (!prepared) { cancellation = null; await entry.reject("runner_reporting_authority_lost"); return; }
-  if (prepared.timeout) { cancellation = null; await entry.reject("preparation_timeout"); return; }
+  if (!prepared) { cancellation = null; await rejectVisible(entry, "runner_reporting_authority_lost"); return; }
+  if (prepared.timeout) { cancellation = null; await rejectVisible(entry, "preparation_timeout"); return; }
   const withdrawal = prepared.withdrawal;
   if (withdrawal.notThisTurn || promptScope?.nativeTurnId !== target.nativeTurnId) {
     cancellation = null;
@@ -719,7 +729,7 @@ async function handleNativeCancel(frame, entry, hooks) {
   }
   if (withdrawal.confirmed !== true) {
     cancellation = null;
-    await entry.reject("preparation_timeout");
+    await rejectVisible(entry, "preparation_timeout");
     return;
   }
   // Core withdrew its asks; withdrawn approvals stay withdrawn.
@@ -900,7 +910,7 @@ async function pump() {
     if (entry && error?.code !== null && [-32600, -32601, -32602].includes(error?.code)) {
       // A known pre-effect rejection: the agent never took the prompt.
       entry.terminalReported = true;
-      void entry.reject("native_prompt_rejected");
+      void rejectVisible(entry, "native_prompt_rejected");
     }
   } finally {
     void nativeChannel.reportTurn({ nativeTurnId, state: "closed", acceptedTurnId: turn.turnId });
@@ -1081,11 +1091,13 @@ async function stop(code, why) {
   await withdrawAllAsks("exited");
   observations.stop();
   await observations.drain();
-  nativeChannel.stop();
-  await nativeChannel.drain(600);
   activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);
+  // End the agent first: an outstanding prompt then settles and posts its
+  // terminal receipt while the channel is still live. The channel is stopped
+  // only after those receipts have had their chance to land — stopping it
+  // first would drop them on the floor.
   killAgent("SIGTERM");
   const exited = new Promise((resolve) => {
     if (childExited) { resolve(); return; }
@@ -1093,6 +1105,8 @@ async function stop(code, why) {
   });
   await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1200))]);
   killAgent("SIGKILL");
+  await nativeChannel.drain(800);
+  nativeChannel.stop();
   await drainPosts();
   process.exit(code);
 }
