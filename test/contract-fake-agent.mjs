@@ -120,6 +120,43 @@ async function handle(msg) {
         send({ jsonrpc: "2.0", method: "session/update",
           params: { sessionId: "fake-new", update: { sessionUpdate: "usage_update", used: 1000, size: 1000000 } } });
       }
+      if (mode === "native") {
+        const text = (msg.params?.prompt ?? []).map((part) => part.text ?? "").join("");
+        const sessionId = "fake-new";
+        if (text.startsWith("WAKE:")) {
+          if (text === "WAKE:FAIL") {
+            // One chunk, then the prompt fails: partial text must never become an answer.
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial-text-before-error" } } } });
+            fail(msg.id, -32603, "fake agent: this turn fails");
+            return;
+          }
+          if (text === "WAKE:EXIT") {
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+              sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial-text-before-exit" } } } });
+            setTimeout(() => exit(3, "native exit mid-wake"), 50);
+            return;
+          }
+          send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+            sessionUpdate: "agent_message_chunk", content: { type: "text", text: `answer ${text}` } } } });
+          reply(msg.id, { stopReason: "end_turn" });
+          return;
+        }
+        if (text.includes("REJECT")) {
+          fail(msg.id, -32602, "fake agent: prompt rejected");
+          return;
+        }
+        if (text.includes("HOLD")) {
+          // Hold until the runner cancels, then report the agent's own stop reason.
+          cancelTurn = () => { cancelTurn = null; reply(msg.id, { stopReason: "cancelled" }); };
+          return;
+        }
+        if (text.includes("EXIT")) { setTimeout(() => exit(3, "native exit"), 100); return; }
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+          sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } } });
+        reply(msg.id, { stopReason: "end_turn" });
+        return;
+      }
       if (mode === "activity") {
         // One tool call and two message chunks (the runner's 10 s throttle must
         // collapse the second chunk); then the agent's own end_turn.

@@ -27,5 +27,12 @@ limits:
   - observation refusals runner_observation_unverified, activity_grant_pending and activity_grant_unverified are retried unchanged; runner_observation_unavailable stops reporting for the run; any other refusal retires that report without retrying (live 0.7.18: conflicting sequence 409 runner_observation_conflict, invalid report 400 invalid_runner_observation)
   - a post refused at the grant stage after rig down reads 401 activity_grant_revoked, not runner_observation_unavailable; the two observation-specific codes were not observed on a real daemon
   - an idle seat's reported model and context go stale after the daemon's ten-minute freshness window and read unknown until the next turn renews them; this is the policy working, not a lost report
+  - native input/wake/named cancel (v0.7.19) are offered only with a run-bound credential; every seat defaults to typed and picks native with rig seat set-input-route --route native, which is also the rollback
+  - a native request is acknowledged for custody before any prompt is written; receipts are retried, native writes are not; a request whose custody was accepted but whose delivery could not happen is reported unavailable, never dropped or typed as a fallback
+  - a wake is answered only by its own dedicated prompt's assistant text and dsh's terminal outcome; an uncorrelated execution reports ownershipUnknown and no answer
+  - a named cancel is reported requested first and cancelled only on dsh's own stopReason cancelled; an unknown target is not-this-turn, unestablished ownership is refused as unknown
+  - cancel preparation polls Core while its withdrawal is still unconfirmed; frames are delivered in run-local sequence order regardless of acknowledgement arrival order
+  - a failed or exiting prompt never yields a wake answer: completion is failed/unknown with answer null, partial text is never promoted
+  - the native channel was verified against a stand-in Core, not yet against a real 0.7.19 daemon
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed

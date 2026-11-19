@@ -28,6 +28,7 @@ Apache-2.0.
 | **Resume** | With `OPENRIG_RESUME_REF`, calls ACP `session/resume` (falling back to `session/load` only for other ACP agents that advertise it). Never calls `session/new` on a resume. dsh 0.2.1-rc.2 advertises `sessionCapabilities.resume` and no `loadSession`; `session/load` returns `-32601`. dsh's "not resumable"/not-found refusal is recorded as `error: "missing"`; any other failure is left unconfirmed. The pane states `resuming <ref> (asked by OpenRig)` or `new conversation (OpenRig passed no resume ref)`. `--require-resume` / `DSH_SEAT_REQUIRE_RESUME=1` refuses a launch with no resume ref before spawning dsh: no conversation is created, and the record carries `error: "resume_required"`. |
 | **First input / model** | `OPENRIG_FIRST_INPUT` bytes become the first prompt. `OPENRIG_MODEL` is matched against dsh's advertised `model` option: `provider/model` (provider exact or a substring such as `deepseek` for `deepseek-official`, model id unique), a unique bare model id, or an exact opaque selector. The mapped value is applied with `session/set_config_option` on fresh launches **and on resumes** (from the resume's `configOptions`). A value that cannot be mapped is reported in the pane with what dsh advertised and dsh's own default remains; a raw value is never sent. |
 | **Run-bound observations (v0.7.18)** | When OpenRig supplies a run-bound credential (`OPENRIG_RUN_ID` + the activity token), the runner reports the model the agent **accepted** — as `provider/model`, read from the `session/set_config_option` reply's model `currentValue`, not from the value it asked for — and the context ACP reports (`usage_update` `used`/`size`). A reply that names no model reports nothing. The report is an observation-only POST to the same endpoint (`{runId, sequence, occurredAt, observations}`), separate from activity: no `hookEvent`, no `eventFamily`, its own sequence. OpenRig shows these as **runner-reported**, not verified by OpenRig. Without `OPENRIG_RUN_ID` (an unbound install-token launch) nothing is reported. |
+| **Native channel (v0.7.19)** | Optional, per seat. When OpenRig supplies a run-bound credential (`OPENRIG_RUN_ID` + the grant token), the runner opens `GET /api/activity/runner-channel`, announces `{type:"hello",version:1,runId,retained,capabilities:{input,wake,cancel}}`, and acknowledges custody of each request before any native effect. An `input` frame becomes **exactly one** `session/prompt`; a `wake` frame waits for the current turn and becomes its own dedicated prompt whose own assistant text is the only answer; a `cancel` frame targets one native invocation and is reported `requested` first, `cancelled` only on dsh's own `stopReason`. It also posts `{type:"turn",...}` opened/closed reports, so Core has the invocation id a named cancel needs. |
 | **Agent environment** | The child gets the baseline shell, OpenRig's identity/routing variables (`OPENRIG_SESSION_NAME`, `OPENRIG_NODE_ID`, `OPENRIG_RUNTIME`, `OPENRIG_OCCUPANT_GENERATION`, `OPENRIG_HOME/URL/HOST/PORT`), the seat's own `DSH_HOME`, dsh's telemetry choice (`DSH_TELEMETRY_DISABLED=1` unless the operator set one), and the declared provider's key when set. It does not inherit the activity hook token or the runner-only launch/attempt/resume variables. |
 
 ## Install
@@ -159,9 +160,46 @@ limits: ...   # see preset/dsh.yaml
   permit path. A real 0.7.7 daemon was not available to run here.
 - Carrying a `turnId` does not make OpenRig reject a stale event; that is daemon-side work on
   OpenRig #43.
+- The native channel needs a run-bound credential (`OPENRIG_RUN_ID` + grant). Without one nothing connects, and the
+  typed path is the whole interaction.
+- The native channel has been exercised against a stand-in Core (contract tests) and **not yet against a real 0.7.19
+  daemon**; the wire shapes are taken from the contract and the daemon's own dsh example.
 - Stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup.
 - Resume uses ACP `session/resume`; a dsh "not resumable" or not-found refusal is reported as
   missing, any other failure is left unconfirmed. A changed declared model is applied on resume.
+
+## Native channel (opt-in, v0.7.19)
+
+Every seat still defaults to `typed`. A seat opts in with
+`rig seat set-input-route <seat> --route native --reason "..."`; until then the runner receives no frames and the
+typed path below is exactly what runs.
+
+With a run-bound credential the runner opens the run-filtered channel and offers `input`, `wake` and `cancel`. When
+Core sends a request the runner:
+
+- validates it (`version`, `runId`, `requestId`, `sequence`, `kind`, payload), refuses anything that does not fit
+  **before** any native or typed effect, and never falls back to typing after an uncertain one;
+- retains the immutable request and its result for the process lifetime, acknowledges custody, and waits for Core's
+  durable acceptance **before** writing the native prompt. HTTP receipts are retried; a native write never is;
+- delivers `input` as one prompt, byte for byte — the same guarantee as the typed path, without the pane;
+- treats `wake` as a dedicated prompt after the current turn: only that prompt's own assistant text and dsh's own
+  terminal outcome become the answer (`{kind:"wake",answer,nativeTurnId,completion}`). Tools, earlier output and
+  partial streaming text are never substituted, and an uncorrelated wake reports
+  `{completion:"unknown",answer:null,ownershipUnknown:true}` instead of inventing an answer;
+- treats `cancel` as a named invocation: it prepares with Core (which withdraws its asks first) and polls while that
+  withdrawal is still `confirmed: false`, rechecks the exact target, sends one `session/cancel`, and reports
+  `requested`/`confirmed:false`. It reports `cancelled` only when dsh answers `stopReason: "cancelled"`; a target the
+  runner does not hold is `not-this-turn`, and ownership it cannot establish is refused as unknown rather than claimed.
+- delivers frames in run-local **sequence order**: a prompt is written only once every lower retained sequence has been
+  decided, so a slow acknowledgement cannot reorder the agent's prompts;
+- never promotes partial text: a prompt that fails or whose agent exits reports `completion: "failed"` or `"unknown"`
+  with `answer: null`, whatever had already streamed into the pane.
+
+A request whose custody was accepted but whose native write could not happen is reported **unavailable** — in the
+pane and to Core — never dropped silently: a nudge that dies quietly would look like an idle seat.
+
+The typed path is unchanged and remains the rollback:
+`rig seat set-input-route <seat> --route typed --reason "revert to typed input"`.
 
 ## Seeing the runner-reported model
 
