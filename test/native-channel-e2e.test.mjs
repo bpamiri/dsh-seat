@@ -296,3 +296,31 @@ test("delivery follows sequence order even when a lower ack arrives last", async
   assert.ok(await waitFor(() => prompts(run.log).length === 2, 10000), `pane: ${run.out()}`);
   assert.deepEqual(prompts(run.log), ["FIRST", "SECOND"], "run-local sequence order, not ack arrival order");
 });
+
+test("a receipt for an outstanding prompt still lands when the runner is asked to stop", async (t) => {
+  // SIGTERM ends the agent, which settles the prompt while the channel is still
+  // live: the terminal receipt must be posted, not dropped by stopping first.
+  const core = await standIn(t);
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-shutdown-1", sequence: 1, kind: "input", payload: { text: "please HOLD" } });
+  assert.ok(await waitFor(() => prompts(run.log)[0]), "the holding prompt never started");
+  assert.ok(await waitFor(() => core.ofType("submitted").length === 1), "no submission before shutdown");
+  run.child.kill("SIGTERM");
+  const terminal = await waitFor(() => core.ofType("result").find((post) => post.requestId === "req-shutdown-1"), 5000);
+  assert.ok(terminal, `the terminal receipt was dropped on shutdown; pane: ${run.out()}`);
+  assert.equal(terminal.kind, undefined, "the receipt carries its detail under result");
+  assert.ok(["failed", "unknown"].includes(terminal.result.completion), `completion was ${terminal.result.completion}`);
+});
+
+test("a rejection is named in the pane with its reason, not silent", async (t) => {
+  // A request refused before any effect reaches Core, but a person reading the
+  // seat must also see that it failed and why.
+  const core = await standIn(t);
+  const run = startRunner(t, { base: core.base });
+  assert.ok(await waitFor(() => core.ofType("hello")[0]));
+  core.push({ requestId: "req-reject-visible", sequence: 1, kind: "input", payload: { text: "please REJECT" } });
+  assert.ok(await waitFor(() => core.ofType("rejected")[0]), `no rejected receipt; pane: ${run.out()}`);
+  const named = await waitFor(() => /native request req-reject-visible \(input\) was not applied: native_prompt_rejected/.test(run.out()));
+  assert.ok(named, `the rejection was silent; pane: ${run.out()}`);
+});

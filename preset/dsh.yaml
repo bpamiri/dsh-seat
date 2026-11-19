@@ -33,6 +33,7 @@ limits:
   - a named cancel is reported requested first and cancelled only on dsh's own stopReason cancelled; an unknown target is not-this-turn, unestablished ownership is refused as unknown
   - cancel preparation polls Core while its withdrawal is still unconfirmed; frames are delivered in run-local sequence order regardless of acknowledgement arrival order
   - a failed or exiting prompt never yields a wake answer: completion is failed/unknown with answer null, partial text is never promoted
+  - a request refused before any effect is named in the pane with its reason (native request <id> (<kind>) was not applied: <reason>); shutdown ends the agent before stopping the channel, so an outstanding prompt's terminal receipt still posts
   - the native channel was verified against a stand-in Core, not yet against a real 0.7.19 daemon
   - stop kills the runner's agent child on hangup; OpenRig does no external compute cleanup
   - resume uses session/resume; dsh 0.2.1-rc.2 advertises sessionCapabilities.resume and no loadSession (session/load returns -32601); a "not resumable"/not-found refusal is reported as missing, any other failure unconfirmed
