@@ -24,6 +24,7 @@ import { prepareDshHome } from "../src/home.mjs";
 import { resolveModelChoice } from "../src/model.mjs";
 import { createPermissionTransport, selectPermitOption } from "../src/permission.mjs";
 import { createObservationReporter, modelIdFromConfigReply } from "../src/observation.mjs";
+import { createNativeChannel } from "../src/channel.mjs";
 
 const VERSION = "0.3.0";
 const DSH_VERSION = "0.2.1-rc.2";
@@ -145,6 +146,38 @@ function resolveEndpoint() {
 endpoint = resolveEndpoint();
 // Run-bound observations (§4, v0.7.18): a separate report from activity. Inert
 // without a run id and token, so an unbound install-token launch reports nothing.
+// ── native channel (contract v0.7.19) ───────────────────────────────────────
+// Opted-in seats get frames from Core; every other seat keeps the typed path
+// untouched. A frame is delivered as exactly one native prompt, only after Core
+// acknowledged custody. Nothing here types a fallback.
+let nativeEpoch = 0;
+let promptScope = null;        // { nativeTurnId, submitted }
+let activeNativeEntry = null;  // the queue entry whose prompt is in flight
+let activePromptText = "";     // assistant text produced by the in-flight prompt
+let cancellation = null;       // { entry, target, submitted }
+const nativeChannel = createNativeChannel({
+  base: endpoint?.base,
+  token: endpoint?.token,
+  runId: OPENRIG.runId,
+  log: (message) => warn(message),
+  onUnavailable: (reason) => warn(`native channel: ${reason}; requests that were not delivered stay unavailable`),
+  delivery: {
+    input(frame, entry) {
+      queue.push({ kind: "input", text: frame.payload.text, entry });
+      line(`[native] input ${frame.requestId} accepted`);
+      pumpLaunch();
+    },
+    wake(frame, entry) {
+      queue.push({ kind: "wake", text: frame.payload.question, entry });
+      line(`[native] wake ${frame.requestId} queued behind the current turn`);
+      pumpLaunch();
+    },
+    cancel(frame, entry, hooks) {
+      void handleNativeCancel(frame, entry, hooks);
+    },
+  },
+});
+
 const observations = createObservationReporter({
   base: endpoint?.base,
   token: endpoint?.token,
@@ -407,6 +440,10 @@ function startAgent(dshHome) {
     // No idle heartbeat once the agent is gone; the exit Stop below is final.
     activity.agentExited();
     observations.stop();
+    // A request whose custody was accepted but whose native write did not
+    // happen is reported as unavailable, never quietly dropped.
+    nativeChannel.stop();
+    void nativeChannel.drain(600);
     if (!shuttingDown) {
       void (async () => {
         await withdrawAllAsks("exited");
@@ -643,13 +680,72 @@ async function handlePermissionRequest(msg) {
   queueSaid(read.said);
 }
 
+function pumpLaunch() { void pump(); }
+
+/** A named cancel: prepare, recheck, then one native session/cancel. */
+async function handleNativeCancel(frame, entry, hooks) {
+  const target = frame.payload.target;
+  if (!promptScope || promptScope.nativeTurnId !== target.nativeTurnId) {
+    // Positively not this turn's invocation: nothing was written, nothing to stop.
+    await entry.result({ kind: "cancel", outcome: "not-this-turn", confirmed: false });
+    return;
+  }
+  if (!promptScope.submitted) {
+    // The prompt exists but its write is not established: ownership is unknown,
+    // which is never proof of "not this turn".
+    await entry.reject("native_turn_ownership_unknown", { kind: "cancel", reason: "native_turn_ownership_unknown", applied: false });
+    return;
+  }
+  if (cancellation) {
+    await entry.reject("cancellation_in_progress", { kind: "cancel", reason: "cancellation_in_progress", applied: false });
+    return;
+  }
+  const operation = { entry, target, submitted: false };
+  cancellation = operation;
+  const withdrawal = await hooks.prepare(frame);
+  if (cancellation !== operation) return;
+  if (!withdrawal) { cancellation = null; await entry.reject("preparation_failed", { kind: "cancel", reason: "preparation_failed", applied: false }); return; }
+  if (withdrawal.notThisTurn || promptScope?.nativeTurnId !== target.nativeTurnId) {
+    cancellation = null;
+    await entry.result({ kind: "cancel", outcome: "not-this-turn", confirmed: false });
+    return;
+  }
+  if (withdrawal.confirmed !== true) {
+    cancellation = null;
+    await entry.reject("preparation_failed", { kind: "cancel", reason: "preparation_failed", applied: false });
+    return;
+  }
+  // Core withdrew its asks; withdrawn approvals stay withdrawn.
+  await withdrawAllAsks("turn_cancelled");
+  if (cancellation !== operation) return;
+  if (!promptScope || promptScope.nativeTurnId !== target.nativeTurnId) {
+    cancellation = null;
+    await entry.result({ kind: "cancel", outcome: "not-this-turn", confirmed: false });
+    return;
+  }
+  const turn = activity.turn;
+  if (turn && !turn.cancelSent) {
+    turn.cancelSent = true;
+    send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+  }
+  operation.submitted = true;
+  // Requested is not stopped: confirmation waits for dsh's own stop reason.
+  entry.markSubmitted(target.nativeTurnId, turn?.turnId ?? null,
+    { kind: "cancel", outcome: "requested", confirmed: false, operationAccepted: false });
+  line(`[native] cancellation ${frame.requestId} for ${target.nativeTurnId} requested, not confirmed`);
+}
+
 function handleAgentNotification(msg) {
   if (msg.method !== "session/update") return;
   const update = msg.params?.update ?? {};
   const kind = update.sessionUpdate;
   if (kind === "agent_message_chunk") {
     const content = update.content;
-    if (content?.type === "text" && typeof content.text === "string") pane(content.text);
+    if (content?.type === "text" && typeof content.text === "string") {
+      pane(content.text);
+      // Only the in-flight prompt's own assistant text can answer a wake.
+      if (activeNativeEntry?.frame.kind === "wake") activePromptText += content.text;
+    }
     // A real message chunk is working evidence; the reporter throttles it and
     // suppresses it while attention is held. Pane output is untouched.
     activity.messageChunk();
@@ -688,6 +784,9 @@ let escapeBuffer = "";
 // reporter owns the turnId, the working-post throttle and the idle beat.
 let promptQueued = false;
 let turnCount = 0;
+// Queue entries: the typed path pushes a plain string; native frames push an
+// object carrying their retained receipt. FIFO across both, so native input
+// that arrives during a dedicated wake waits its turn.
 const queue = [];
 // open permission asks are tracked in bin's answered-permissions section
 
@@ -751,10 +850,14 @@ function cancelTurn() {
 
 async function pump() {
   if (promptQueued || !sessionId || shuttingDown) return;
-  const text = queue.shift();
-  if (text === undefined) return;
+  const next = queue.shift();
+  if (next === undefined) return;
+  const entry = typeof next === "string" ? null : next.entry;
+  const text = typeof next === "string" ? next : next.text;
   promptQueued = true;
   refusedHeld = false;
+  activeNativeEntry = entry;
+  activePromptText = "";
   const turn = activity.beginTurn(String(++turnCount));
   turn.finished = false;
   // Keep reported facts current on a long-lived seat: renew only when the last
@@ -764,8 +867,19 @@ async function pump() {
   line(`you ▸ ${text.split("\n")[0].slice(0, 160)}${text.includes("\n") ? " …" : ""}`);
   let stopReason = "end_turn";
   let failed = false;
+  // The native invocation this prompt begins; Core needs it to target a cancel.
+  const nativeTurnId = `dsh-prompt-${++nativeEpoch}`;
+  promptScope = { nativeTurnId, submitted: false };
   try {
-    const result = await request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+    // Open the invocation before the write, so a prompt is never running
+    // without a name Core can name in a cancel target.
+    void nativeChannel.reportTurn({ nativeTurnId, state: "opened", acceptedTurnId: turn.turnId });
+    const promptRequest = request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+    // The write is issued synchronously by request(): from here this invocation
+    // is the outstanding native prompt, and a cancel may name it.
+    promptScope.submitted = true;
+    if (entry) entry.markSubmitted(nativeTurnId, turn.turnId);
+    const result = await promptRequest;
     stopReason = typeof result?.stopReason === "string" ? result.stopReason : "end_turn";
   } catch (error) {
     failed = true;
@@ -773,7 +887,40 @@ async function pump() {
       warn(`prompt failed: ${error.message}`);
       post("Notification", "runtime_error", { turnId: turn.turnId });
     }
+    if (entry && error?.code !== null && [-32600, -32601, -32602].includes(error?.code)) {
+      // A known pre-effect rejection: the agent never took the prompt.
+      entry.terminalReported = true;
+      void entry.reject("native_prompt_rejected", { kind: entry.frame.kind, reason: "native_prompt_rejected", applied: false });
+    }
   } finally {
+    void nativeChannel.reportTurn({ nativeTurnId, state: "closed", acceptedTurnId: turn.turnId });
+    // A named cancellation for this exact invocation is answered by dsh's own
+    // stop reason: only "cancelled" proves the work stopped.
+    if (cancellation?.target.nativeTurnId === nativeTurnId) {
+      const operation = cancellation;
+      cancellation = null;
+      const confirmed = stopReason === "cancelled" && operation.submitted;
+      void operation.entry.result({ kind: "cancel", outcome: confirmed ? "cancelled" : "requested", confirmed });
+      if (!confirmed) line(`[native] cancellation ${operation.entry.frame.requestId} was requested but dsh ended with ${stopReason}; not reported as stopped`);
+    }
+    if (entry && !entry.terminalReported) {
+      const submitted = promptScope?.nativeTurnId === nativeTurnId && promptScope.submitted;
+      const completion = !submitted ? "unknown" : stopReason === "cancelled" ? "interrupted"
+        : stopReason === "end_turn" ? (entry.frame.kind === "wake" && !activePromptText ? "unknown" : "completed")
+          : stopReason === "error" ? "failed" : "unknown";
+      if (entry.frame.kind === "wake") {
+        // Only the dedicated prompt's own assistant text can be the answer.
+        const answer = completion === "completed" ? activePromptText : null;
+        void entry.result({ kind: "wake", answer, nativeTurnId, completion,
+          ...(submitted ? {} : { ownershipUnknown: true }) });
+        if (!submitted) line(`[native] wake ${entry.frame.requestId} could not be correlated to its prompt; ownership unknown`);
+      } else {
+        void entry.result({ kind: "input", nativeTurnId, completion, ...(submitted ? { accepted: true } : { submissionUnknown: true }) });
+      }
+      entry.terminalReported = true;
+    }
+    promptScope = null;
+    activeNativeEntry = null;
     // End the turn *after* any ask is withdrawn: a waiter can then settle the
     // cancelled turn as usual, while a refused-and-held permission keeps its
     // attention and suppresses the Stop.
@@ -924,6 +1071,8 @@ async function stop(code, why) {
   await withdrawAllAsks("exited");
   observations.stop();
   await observations.drain();
+  nativeChannel.stop();
+  await nativeChannel.drain(600);
   activity.shutdown();
   restoreTty();
   warn(`shutting down (${why})`);
@@ -993,6 +1142,10 @@ async function main() {
   try {
     await openConversation();
     line(`[dsh-seat] ${presetName} ready · ACP ${PROTOCOL_VERSION}`);
+    if (nativeChannel.enabled) {
+      line("[dsh-seat] native channel available (input, wake, named cancel); seats on the typed route are unaffected");
+      void nativeChannel.connect();
+    }
     // The seat is idle until the first prompt: start the 60 s heartbeat. A
     // first prompt (or a queued one) immediately starts a turn and stops it.
     activity.idle();
